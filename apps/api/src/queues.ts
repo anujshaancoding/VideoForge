@@ -42,5 +42,14 @@ export interface RenderJobData {
   exportId: string;
   projectId: string;
   workspaceId: string;
+  /** The full §18 project document — the worker validates + renders this. */
+  project: unknown;
   settings: Record<string, unknown>;
+  /** S3 keys for every asset referenced by the project (assetId → keys). */
+  s3Keys: {
+    [assetId: string]: {
+      original?: string;
+      proxy?: string;
+    };
+  };
 }

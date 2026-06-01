@@ -129,79 +129,110 @@ function generateFakePeaks(count = 1000): string {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function processMediaJob(job: Job<MediaJobData>): Promise<void> {
-  const { assetId, s3KeyOriginal } = job.data;
+  const { assetId, s3KeyOriginal, contentType } = job.data;
+  const workspaceId = job.data.workspaceId ?? 'dev-workspace';
+  const isAudio = (contentType ?? '').startsWith('audio/');
+  const isImage = (contentType ?? '').startsWith('image/');
   const redis = getPubRedis();
   const tempFiles: string[] = [];
 
   try {
     // 1. Download the original from S3.
-    console.info(`[media-worker] ${assetId}: downloading original`);
+    console.info(`[media-worker] ${assetId}: downloading original (${contentType})`);
     const inputPath = await downloadFromS3(BUCKET_ORIGINALS, s3KeyOriginal);
     tempFiles.push(inputPath);
 
-    // 2a. Generate 720p H.264/AAC proxy.
-    const proxyPath = join(tmpdir(), `vf-proxy-${assetId}.mp4`);
-    tempFiles.push(proxyPath);
-    console.info(`[media-worker] ${assetId}: generating proxy`);
-    await runFfmpeg(
-      [
-        '-y', '-hide_banner', '-nostdin',
-        '-i', inputPath,
-        '-vf', 'scale=1280:720',
-        '-c:v', 'libx264',
-        '-crf', '23',
-        '-preset', 'fast',
-        '-c:a', 'aac',
-        '-b:a', '128k',
-        proxyPath,
-      ],
-      `proxy:${assetId}`,
-    );
+    let proxyKey: string | undefined;
+    let thumbnailKey: string | undefined;
+    let waveformKey: string | undefined;
 
-    // 2b. Generate thumbnail (first of up to 10 frames at 1 fps, 160×90).
-    const thumbDir = tmpdir();
-    const thumbPattern = join(thumbDir, `vf-thumb-${assetId}-%03d.jpg`);
-    const thumb0 = join(thumbDir, `vf-thumb-${assetId}-001.jpg`);
-    tempFiles.push(thumb0);
-    console.info(`[media-worker] ${assetId}: generating thumbnails`);
-    await runFfmpeg(
-      [
-        '-y', '-hide_banner', '-nostdin',
-        '-i', inputPath,
-        '-vf', 'fps=1,scale=160:90',
-        '-frames:v', '10',
-        thumbPattern,
-      ],
-      `thumb:${assetId}`,
-    );
+    if (isAudio) {
+      // ── Audio: AAC/mp4 audio-only proxy + waveform. No video filter, no thumb. ──
+      const proxyPath = join(tmpdir(), `vf-proxy-${assetId}.m4a`);
+      tempFiles.push(proxyPath);
+      console.info(`[media-worker] ${assetId}: generating audio proxy`);
+      await runFfmpeg(
+        ['-y', '-hide_banner', '-nostdin', '-i', inputPath, '-vn', '-c:a', 'aac', '-b:a', '128k', proxyPath],
+        `proxy:${assetId}`,
+      );
+      proxyKey = `${assetId}/proxy.m4a`;
+      await uploadToS3(proxyPath, BUCKET_PROXIES, proxyKey, 'audio/mp4');
 
-    // 2c. Generate waveform peaks (MVP: synthetic random peaks).
-    const waveformPath = join(tmpdir(), `vf-waveform-${assetId}.json`);
-    tempFiles.push(waveformPath);
-    await writeFile(waveformPath, generateFakePeaks());
+      const waveformPath = join(tmpdir(), `vf-waveform-${assetId}.json`);
+      tempFiles.push(waveformPath);
+      await writeFile(waveformPath, generateFakePeaks());
+      waveformKey = `${assetId}/waveform.json`;
+      await uploadToS3(waveformPath, BUCKET_PROXIES, waveformKey, 'application/json');
+    } else if (isImage) {
+      // ── Image: a downscaled JPG serves as both proxy and thumbnail. ──
+      const thumbPath = join(tmpdir(), `vf-thumb-${assetId}.jpg`);
+      tempFiles.push(thumbPath);
+      console.info(`[media-worker] ${assetId}: generating image thumbnail`);
+      await runFfmpeg(
+        ['-y', '-hide_banner', '-nostdin', '-i', inputPath, '-vf', 'scale=160:90:force_original_aspect_ratio=decrease', '-frames:v', '1', thumbPath],
+        `thumb:${assetId}`,
+      );
+      thumbnailKey = `${assetId}/thumb.jpg`;
+      await uploadToS3(thumbPath, BUCKET_PROXIES, thumbnailKey, 'image/jpeg');
+    } else {
+      // ── Video: 720p H.264/AAC proxy + thumbnail + waveform. ──
+      const proxyPath = join(tmpdir(), `vf-proxy-${assetId}.mp4`);
+      tempFiles.push(proxyPath);
+      console.info(`[media-worker] ${assetId}: generating video proxy`);
+      await runFfmpeg(
+        [
+          '-y', '-hide_banner', '-nostdin',
+          '-i', inputPath,
+          '-vf', 'scale=1280:720:force_original_aspect_ratio=decrease',
+          '-c:v', 'libx264', '-crf', '23', '-preset', 'fast',
+          '-c:a', 'aac', '-b:a', '128k',
+          proxyPath,
+        ],
+        `proxy:${assetId}`,
+      );
+      proxyKey = `${assetId}/proxy.mp4`;
+      await uploadToS3(proxyPath, BUCKET_PROXIES, proxyKey, 'video/mp4');
 
-    // 3. Upload proxy.
-    const proxyKey = `${assetId}/proxy.mp4`;
-    console.info(`[media-worker] ${assetId}: uploading proxy`);
-    await uploadToS3(proxyPath, BUCKET_PROXIES, proxyKey, 'video/mp4');
+      const thumb0 = join(tmpdir(), `vf-thumb-${assetId}.jpg`);
+      tempFiles.push(thumb0);
+      console.info(`[media-worker] ${assetId}: generating thumbnail`);
+      // Seek 1s in (or clamp to start) for a representative frame, not a black intro.
+      await runFfmpeg(
+        ['-y', '-hide_banner', '-nostdin', '-ss', '1', '-i', inputPath, '-vf', 'scale=160:90:force_original_aspect_ratio=decrease', '-frames:v', '1', thumb0],
+        `thumb:${assetId}`,
+      );
+      thumbnailKey = `${assetId}/thumb.jpg`;
+      await uploadToS3(thumb0, BUCKET_PROXIES, thumbnailKey, 'image/jpeg');
 
-    // 4. Upload thumbnail (first frame).
-    const thumbnailKey = `${assetId}/thumb.jpg`;
-    console.info(`[media-worker] ${assetId}: uploading thumbnail`);
-    await uploadToS3(thumb0, BUCKET_PROXIES, thumbnailKey, 'image/jpeg');
+      const waveformPath = join(tmpdir(), `vf-waveform-${assetId}.json`);
+      tempFiles.push(waveformPath);
+      await writeFile(waveformPath, generateFakePeaks());
+      waveformKey = `${assetId}/waveform.json`;
+      await uploadToS3(waveformPath, BUCKET_PROXIES, waveformKey, 'application/json');
+    }
 
-    // 5. Upload waveform peaks.
-    const waveformKey = `${assetId}/waveform.json`;
-    console.info(`[media-worker] ${assetId}: uploading waveform`);
-    await uploadToS3(waveformPath, BUCKET_PROXIES, waveformKey, 'application/json');
-
-    // 6. Publish asset:ready.
+    // Publish asset:ready. The API subscriber persists these keys to Postgres
+    // (status PROCESSING → READY) and broadcasts to the workspace WS room.
     await redis.publish(
       'asset:ready',
-      JSON.stringify({ assetId, proxyKey, thumbnailKey, waveformKey }),
+      JSON.stringify({
+        type: 'asset:ready',
+        assetId,
+        workspaceId,
+        ...(proxyKey ? { proxyKey } : {}),
+        ...(thumbnailKey ? { thumbnailKey } : {}),
+        ...(waveformKey ? { waveformKey } : {}),
+      }),
     );
 
     console.info(`[media-worker] ${assetId}: ready`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await redis.publish(
+      'asset:failed',
+      JSON.stringify({ type: 'asset:failed', assetId, workspaceId, message }),
+    );
+    throw err;
   } finally {
     await Promise.allSettled(tempFiles.map((p) => cleanupFile(p)));
   }

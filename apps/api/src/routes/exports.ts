@@ -10,15 +10,28 @@
 
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
-import { eq, and } from 'drizzle-orm';
+import { eq, and, inArray } from 'drizzle-orm';
 import { validateProject, type Project } from '@videoforge/project-schema';
 import { buildExportCommand, type ExportSettings } from '@videoforge/ffmpeg-graph';
 import { db } from '../db/client.js';
-import { projects, exportJobs } from '../db/schema.js';
+import { projects, exportJobs, assets } from '../db/schema.js';
 import { presignGet, BUCKET_EXPORTS } from '../s3.js';
 import { renderQueue, type RenderJobData, redisClient } from '../queues.js';
 
 const DEV_WORKSPACE = 'dev-workspace';
+
+/** Collect every distinct sourceAssetId referenced by clips/overlays in a project. */
+function collectAssetIds(project: Project): string[] {
+  const ids = new Set<string>();
+  for (const track of project.tracks) {
+    const clips = (track as { clips?: Array<{ sourceAssetId?: string }> }).clips;
+    if (!clips) continue; // caption tracks have `blocks`, not `clips`
+    for (const clip of clips) {
+      if (clip.sourceAssetId) ids.add(clip.sourceAssetId);
+    }
+  }
+  return [...ids];
+}
 
 /** Free-tier MVP export defaults (MP4/H.264 ≤1080p, watermark on). */
 const DEFAULT_EXPORT_SETTINGS: ExportSettings = {
@@ -109,6 +122,32 @@ export async function exportRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
+    // Resolve the S3 keys for every asset the project references so the worker
+    // can fetch the ORIGINAL (proxy fallback) when it builds the filter_complex.
+    const assetIds = collectAssetIds(project);
+    const s3Keys: RenderJobData['s3Keys'] = {};
+    if (assetIds.length > 0) {
+      const assetRows = await db
+        .select({
+          id: assets.id,
+          s3KeyOriginal: assets.s3KeyOriginal,
+          s3KeyProxy: assets.s3KeyProxy,
+        })
+        .from(assets)
+        .where(
+          and(
+            eq(assets.workspaceId, DEV_WORKSPACE),
+            inArray(assets.id, assetIds),
+          ),
+        );
+      for (const row of assetRows) {
+        s3Keys[row.id] = {
+          ...(row.s3KeyOriginal ? { original: row.s3KeyOriginal } : {}),
+          ...(row.s3KeyProxy ? { proxy: row.s3KeyProxy } : {}),
+        };
+      }
+    }
+
     const exportId = randomUUID();
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
 
@@ -126,7 +165,9 @@ export async function exportRoutes(app: FastifyInstance): Promise<void> {
       exportId,
       projectId,
       workspaceId: DEV_WORKSPACE,
+      project,
       settings: mergedSettings as unknown as Record<string, unknown>,
+      s3Keys,
     };
     await renderQueue.add('render', jobData);
 

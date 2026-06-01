@@ -238,6 +238,7 @@ function substituteInputPaths(
 async function spawnFfmpeg(
   finalArgs: string[],
   exportId: string,
+  workspaceId: string,
   totalSeconds: number,
   redis: Redis,
 ): Promise<void> {
@@ -247,6 +248,7 @@ async function spawnFfmpeg(
     const stderrLines: string[] = [];
     const MAX_STDERR_LINES = 100;
 
+    const wallStart = Date.now();
     child.stderr.on('data', (chunk: Buffer) => {
       const text = chunk.toString();
       const lines = text.split('\n');
@@ -258,10 +260,20 @@ async function spawnFfmpeg(
         const elapsed = parseTimeFromFfmpegLine(line);
         if (elapsed !== null) {
           const progress = Math.min(99, Math.round((elapsed / totalSeconds) * 100));
-          const etaSeconds = elapsed > 0
-            ? Math.round(((totalSeconds - elapsed) / elapsed) * (Date.now() / 1000 - Date.now() / 1000))
-            : null;
-          const payload = JSON.stringify({ exportId, progress, etaSeconds });
+          // ETA from wall-clock render rate: how long the remaining media will take
+          // at the speed we've encoded so far.
+          const wallElapsedSec = (Date.now() - wallStart) / 1000;
+          const etaSeconds =
+            elapsed > 0 && wallElapsedSec > 0
+              ? Math.max(0, Math.round((wallElapsedSec / elapsed) * (totalSeconds - elapsed)))
+              : null;
+          const payload = JSON.stringify({
+            type: 'export:progress',
+            exportId,
+            workspaceId,
+            progress,
+            etaSeconds,
+          });
           void redis.publish('export:progress', payload);
         }
       }
@@ -323,6 +335,7 @@ export async function processRenderJob(
   job: Job<RenderJobData>,
 ): Promise<RenderJobResult> {
   const { exportId } = job.data;
+  const workspaceId = job.data.workspaceId ?? 'dev-workspace';
   const redis = getPubRedis();
   const tempFiles: string[] = [];
 
@@ -388,7 +401,7 @@ export async function processRenderJob(
     const totalSeconds = projectDurationSeconds(project);
 
     // 8. Spawn FFmpeg and wait for completion.
-    await spawnFfmpeg(finalArgs, exportId, totalSeconds, redis);
+    await spawnFfmpeg(finalArgs, exportId, workspaceId, totalSeconds, redis);
 
     // 9. Upload the output to S3.
     const s3Key = `exports/${exportId}.mp4`;
@@ -397,11 +410,19 @@ export async function processRenderJob(
     // 10. Publish export:complete.
     await redis.publish(
       'export:complete',
-      JSON.stringify({ exportId, s3Key }),
+      JSON.stringify({ type: 'export:complete', exportId, workspaceId, s3Key }),
     );
 
     console.info(`[render-worker] export ${exportId} complete → s3://${BUCKET_EXPORTS}/${s3Key}`);
     return { exportId, s3Key };
+  } catch (err) {
+    // Publish a failure event so the API can mark the export FAILED and notify the client.
+    const message = err instanceof Error ? err.message : String(err);
+    await getPubRedis().publish(
+      'export:failed',
+      JSON.stringify({ type: 'export:failed', exportId, workspaceId, message }),
+    );
+    throw err;
   } finally {
     // 11. Clean up all temp files regardless of success/failure.
     await Promise.allSettled(tempFiles.map((p) => cleanupFile(p)));

@@ -13,11 +13,15 @@ import fastifyJwt from '@fastify/jwt';
 import fastifyCookie from '@fastify/cookie';
 import fastifyWebsocket from '@fastify/websocket';
 
+import { eq } from 'drizzle-orm';
 import { projectRoutes } from './routes/projects.js';
 import { assetRoutes } from './routes/assets.js';
 import { exportRoutes } from './routes/exports.js';
 import { registerWs, broadcast } from './ws.js';
 import { redisClient } from './queues.js';
+import { db } from './db/client.js';
+import { assets, exportJobs } from './db/schema.js';
+import { runMigrations } from './db/migrate.js';
 
 /** API version prefix used by every §14 route group. */
 export const API_PREFIX = '/api/v1';
@@ -98,36 +102,54 @@ export async function buildServer(): Promise<FastifyInstance> {
 
 // ── Redis subscriber ───────────────────────────────────────────────────────
 
+/** The exact channels the media + render workers publish on. */
+const WORKER_CHANNELS = [
+  'asset:ready',
+  'asset:failed',
+  'export:progress',
+  'export:complete',
+  'export:failed',
+] as const;
+
+interface WorkerEvent {
+  type?: string;
+  workspaceId?: string;
+  assetId?: string;
+  exportId?: string;
+  progress?: number;
+  proxyKey?: string;
+  thumbnailKey?: string;
+  waveformKey?: string;
+  s3Key?: string;
+  message?: string;
+  [key: string]: unknown;
+}
+
 /**
- * Subscribe to worker-published Redis channels and relay events to WS rooms.
+ * Subscribe to worker-published Redis channels. The API is the single owner of
+ * Postgres, so this subscriber is where worker progress is PERSISTED (status
+ * transitions, S3 keys) and then relayed to the workspace WebSocket room.
  *
- * Channel conventions (workers publish JSON):
- *   asset:ready:<assetId>   → { type:'asset:ready', assetId, workspaceId }
- *   export:progress:<id>    → { type:'export:progress', exportId, workspaceId, progress }
+ * Channels (workers publish flat JSON, no per-id suffix):
+ *   asset:ready      → { type, assetId, workspaceId, proxyKey, thumbnailKey, waveformKey }
+ *   asset:failed     → { type, assetId, workspaceId, message }
+ *   export:progress  → { type, exportId, workspaceId, progress, etaSeconds }
+ *   export:complete  → { type, exportId, workspaceId, s3Key }
+ *   export:failed    → { type, exportId, workspaceId, message }
  */
 async function setupRedisSubscriber(app: FastifyInstance): Promise<void> {
   try {
-    // Use a dedicated subscriber connection (ioredis requires a separate client
-    // for subscribe mode).
+    // ioredis requires a dedicated connection for subscribe mode.
     const sub = redisClient.duplicate();
 
     sub.on('error', (err: Error) => {
       app.log.warn({ err }, 'redis subscriber error');
     });
 
-    await sub.psubscribe('asset:ready:*', 'export:progress:*');
+    await sub.subscribe(...WORKER_CHANNELS);
 
-    sub.on('pmessage', (_pattern: string, _channel: string, message: string) => {
-      try {
-        const payload = JSON.parse(message) as {
-          workspaceId?: string;
-          [key: string]: unknown;
-        };
-        const workspaceId = payload['workspaceId'] ?? 'dev-workspace';
-        broadcast(workspaceId, payload);
-      } catch {
-        // Malformed message — ignore.
-      }
+    sub.on('message', (channel: string, message: string) => {
+      void handleWorkerEvent(app, channel, message);
     });
 
     app.log.info('redis pub/sub subscriber ready');
@@ -135,6 +157,93 @@ async function setupRedisSubscriber(app: FastifyInstance): Promise<void> {
     // Non-fatal: WS push will simply not work until Redis is available.
     app.log.warn({ err }, 'failed to connect redis subscriber; WS push disabled');
   }
+}
+
+/** Persist a worker event to Postgres, then broadcast it to the workspace WS room. */
+async function handleWorkerEvent(
+  app: FastifyInstance,
+  channel: string,
+  message: string,
+): Promise<void> {
+  let payload: WorkerEvent;
+  try {
+    payload = JSON.parse(message) as WorkerEvent;
+  } catch {
+    return; // malformed message — ignore
+  }
+  const workspaceId = payload.workspaceId ?? 'dev-workspace';
+
+  try {
+    switch (channel) {
+      case 'asset:ready':
+        if (payload.assetId) {
+          await db
+            .update(assets)
+            .set({
+              status: 'READY',
+              ...(payload.proxyKey ? { s3KeyProxy: payload.proxyKey } : {}),
+              ...(payload.thumbnailKey ? { s3KeyThumbnail: payload.thumbnailKey } : {}),
+              ...(payload.waveformKey ? { s3KeyWaveform: payload.waveformKey } : {}),
+            })
+            .where(eq(assets.id, payload.assetId));
+        }
+        break;
+
+      case 'asset:failed':
+        if (payload.assetId) {
+          await db
+            .update(assets)
+            .set({ status: 'FAILED' })
+            .where(eq(assets.id, payload.assetId));
+        }
+        break;
+
+      case 'export:progress':
+        if (payload.exportId) {
+          await db
+            .update(exportJobs)
+            .set({
+              status: 'RUNNING',
+              progress: typeof payload.progress === 'number' ? payload.progress : 0,
+              updatedAt: new Date(),
+            })
+            .where(eq(exportJobs.id, payload.exportId));
+        }
+        break;
+
+      case 'export:complete':
+        if (payload.exportId) {
+          await db
+            .update(exportJobs)
+            .set({
+              status: 'COMPLETE',
+              progress: 100,
+              ...(payload.s3Key ? { s3KeyOutput: payload.s3Key } : {}),
+              updatedAt: new Date(),
+            })
+            .where(eq(exportJobs.id, payload.exportId));
+        }
+        break;
+
+      case 'export:failed':
+        if (payload.exportId) {
+          await db
+            .update(exportJobs)
+            .set({
+              status: 'FAILED',
+              errorMessage: payload.message ?? 'render failed',
+              updatedAt: new Date(),
+            })
+            .where(eq(exportJobs.id, payload.exportId));
+        }
+        break;
+    }
+  } catch (err) {
+    app.log.error({ err, channel }, 'failed to persist worker event');
+  }
+
+  // Relay to the workspace WS room regardless of persistence outcome.
+  broadcast(workspaceId, payload);
 }
 
 // ── Entry point ────────────────────────────────────────────────────────────
@@ -151,6 +260,17 @@ async function start(): Promise<void> {
   const app = await buildServer();
   const port = resolvePort();
   const host = process.env['HOST'] ?? '0.0.0.0';
+
+  // Apply DB migrations before accepting traffic so a fresh database just works
+  // (CREATE TABLE IF NOT EXISTS — idempotent). Fatal on failure: the API cannot
+  // serve without its schema.
+  try {
+    await runMigrations();
+    app.log.info('database migrations applied');
+  } catch (err) {
+    app.log.error({ err }, 'database migration failed; cannot start');
+    process.exit(1);
+  }
 
   try {
     await app.listen({ port, host });
