@@ -1,9 +1,11 @@
-# VideoForge — local backing services (Pipeline.md §2.4).
+# VideoForge — local backing services + render worker (Pipeline.md §2.4).
 # apps/web + apps/api run on the host for fast HMR; apps/render-worker runs from
-# its own pinned-FFmpeg image (added by the render-worker package). This file
-# brings up the three stateful backing services + a one-shot bucket creator.
+# its own pinned-FFmpeg image so dev FFmpeg == CI FFmpeg == golden-frame encoder.
+# This file brings up the three stateful backing services, a one-shot bucket
+# creator, and the containerized worker.
 #
-#   docker compose up -d --wait
+#   docker compose up -d --wait        # services + worker, blocks until healthy
+#   docker compose up render-worker    # just the worker, attached
 #
 name: videoforge-dev
 
@@ -42,8 +44,8 @@ services:
     image: minio/minio:latest
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
-      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minioadmin}
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-minioadmin}
     ports:
       - "9000:9000"   # S3 API
       - "9001:9001"   # web console (minioadmin / minioadmin)
@@ -55,20 +57,50 @@ services:
       timeout: 3s
       retries: 10
 
-  # One-shot: creates the bucket (with originals/ proxies/ exports/ prefixes
-  # used at runtime) once MinIO is healthy, then exits.
-  minio-setup:
+  # One-shot: creates the THREE runtime buckets (originals/proxies/exports) once
+  # MinIO is healthy, then exits. Names are read from env with the same defaults
+  # the application code uses (apps/{api,render-worker}/src/s3.ts).
+  minio-init:
     image: minio/mc:latest
     depends_on:
       minio:
         condition: service_healthy
     entrypoint: >
       /bin/sh -c "
-      mc alias set local http://minio:9000 ${S3_ACCESS_KEY:-minioadmin} ${S3_SECRET_KEY:-minioadmin};
-      mc mb -p local/${S3_BUCKET:-videoforge};
-      mc anonymous set none local/${S3_BUCKET:-videoforge};
+      mc alias set local http://minio:9000 ${S3_ACCESS_KEY_ID:-minioadmin} ${S3_SECRET_ACCESS_KEY:-minioadmin};
+      mc mb -p local/${S3_BUCKET_ORIGINALS:-vf-originals};
+      mc mb -p local/${S3_BUCKET_PROXIES:-vf-proxies};
+      mc mb -p local/${S3_BUCKET_EXPORTS:-vf-exports};
+      mc anonymous set none local/${S3_BUCKET_ORIGINALS:-vf-originals};
+      mc anonymous set none local/${S3_BUCKET_PROXIES:-vf-proxies};
+      mc anonymous set none local/${S3_BUCKET_EXPORTS:-vf-exports};
       exit 0;
       "
+
+  # Containerized so dev FFmpeg == CI FFmpeg == golden-frame encoder (spec §22.3).
+  # Build context is the repo root because the Dockerfile copies the monorepo
+  # workspace files (pnpm-workspace.yaml, packages/*, apps/render-worker).
+  render-worker:
+    build:
+      context: .
+      dockerfile: apps/render-worker/Dockerfile   # pins FFmpeg (§2.6)
+    env_file:
+      - .env
+    environment:
+      # Override the host-localhost values from .env with compose service DNS:
+      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgresql://${POSTGRES_USER:-videoforge}:${POSTGRES_PASSWORD:-videoforge_dev}@postgres:5432/${POSTGRES_DB:-videoforge}
+      S3_ENDPOINT: http://minio:9000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    # Mount the source for hot-reload during dev; the image still owns FFmpeg.
+    volumes:
+      - ./apps/render-worker/src:/app/apps/render-worker/src
 
 volumes:
   pgdata:

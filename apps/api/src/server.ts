@@ -120,6 +120,9 @@ interface WorkerEvent {
   proxyKey?: string;
   thumbnailKey?: string;
   waveformKey?: string;
+  durationMs?: number;
+  width?: number;
+  height?: number;
   s3Key?: string;
   message?: string;
   [key: string]: unknown;
@@ -131,7 +134,7 @@ interface WorkerEvent {
  * transitions, S3 keys) and then relayed to the workspace WebSocket room.
  *
  * Channels (workers publish flat JSON, no per-id suffix):
- *   asset:ready      → { type, assetId, workspaceId, proxyKey, thumbnailKey, waveformKey }
+ *   asset:ready      → { type, assetId, workspaceId, proxyKey, thumbnailKey, waveformKey, durationMs?, width?, height? }
  *   asset:failed     → { type, assetId, workspaceId, message }
  *   export:progress  → { type, exportId, workspaceId, progress, etaSeconds }
  *   export:complete  → { type, exportId, workspaceId, s3Key }
@@ -184,6 +187,9 @@ async function handleWorkerEvent(
               ...(payload.proxyKey ? { s3KeyProxy: payload.proxyKey } : {}),
               ...(payload.thumbnailKey ? { s3KeyThumbnail: payload.thumbnailKey } : {}),
               ...(payload.waveformKey ? { s3KeyWaveform: payload.waveformKey } : {}),
+              ...(typeof payload.durationMs === 'number' ? { durationMs: payload.durationMs } : {}),
+              ...(typeof payload.width === 'number' ? { width: payload.width } : {}),
+              ...(typeof payload.height === 'number' ? { height: payload.height } : {}),
             })
             .where(eq(assets.id, payload.assetId));
         }

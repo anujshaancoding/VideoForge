@@ -27,6 +27,77 @@ import { projects } from '../db/schema.js';
 /** MVP stub: single workspace for all requests. */
 const DEV_WORKSPACE = 'dev-workspace';
 
+// ── Free-tier plan limits (hard-coded, MVP_Scope §3.10) ──────────────────────
+const PLAN_LIMITS = {
+  maxVideoTracks: 3,
+  maxAudioTracks: 2,
+  maxVoiceOverTracks: 1,
+  maxOverlayTracks: 2,
+  /** Max project duration in ms (10 minutes). */
+  maxProjectDurationMs: 600_000,
+} as const;
+
+/**
+ * Pure free-tier limit check. Returns a human-readable error message when the
+ * project violates a cap, or `null` when it is within limits.
+ *
+ * Counts tracks by type and computes project duration as the maximum
+ * `endOnTimeline` across all media clips. Resolution is NOT checked here —
+ * that is clamped server-side at export time.
+ */
+export function checkPlanLimits(project: Project): string | null {
+  let videoTracks = 0;
+  let audioTracks = 0;
+  let voiceOverTracks = 0;
+  let overlayTracks = 0;
+  let maxEnd = 0;
+
+  for (const track of project.tracks) {
+    switch (track.type) {
+      case 'video':
+        videoTracks += 1;
+        break;
+      case 'audio':
+        audioTracks += 1;
+        break;
+      case 'voiceover':
+        voiceOverTracks += 1;
+        break;
+      case 'overlay':
+        overlayTracks += 1;
+        break;
+      default:
+        break;
+    }
+
+    const clips = (track as { clips?: Array<{ endOnTimeline?: unknown }> }).clips;
+    if (clips) {
+      for (const clip of clips) {
+        const end = Number(clip.endOnTimeline);
+        if (Number.isFinite(end) && end > maxEnd) maxEnd = end;
+      }
+    }
+  }
+
+  if (videoTracks > PLAN_LIMITS.maxVideoTracks) {
+    return `Free tier allows at most ${PLAN_LIMITS.maxVideoTracks} video tracks (got ${videoTracks})`;
+  }
+  if (audioTracks > PLAN_LIMITS.maxAudioTracks) {
+    return `Free tier allows at most ${PLAN_LIMITS.maxAudioTracks} audio tracks (got ${audioTracks})`;
+  }
+  if (voiceOverTracks > PLAN_LIMITS.maxVoiceOverTracks) {
+    return `Free tier allows at most ${PLAN_LIMITS.maxVoiceOverTracks} voiceover track (got ${voiceOverTracks})`;
+  }
+  if (overlayTracks > PLAN_LIMITS.maxOverlayTracks) {
+    return `Free tier allows at most ${PLAN_LIMITS.maxOverlayTracks} overlay tracks (got ${overlayTracks})`;
+  }
+  if (maxEnd > PLAN_LIMITS.maxProjectDurationMs) {
+    return `Free tier allows projects up to ${PLAN_LIMITS.maxProjectDurationMs / 60_000} minutes (got ${(maxEnd / 60_000).toFixed(2)} minutes)`;
+  }
+
+  return null;
+}
+
 // ── Body shapes ──────────────────────────────────────────────────────────────
 
 interface CreateProjectBody {
@@ -101,6 +172,13 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
 
     const project = newProject(coerced);
 
+    const limitError = checkPlanLimits(project);
+    if (limitError) {
+      return reply
+        .code(422)
+        .send({ error: 'PlanLimitExceeded', message: limitError });
+    }
+
     await db.insert(projects).values({
       id: project.id,
       workspaceId: DEV_WORKSPACE,
@@ -159,7 +237,15 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
           .send({ error: 'NotFound', message: 'project not found' });
       }
 
-      const result = validateProject(request.body);
+      // Contract: the autosave envelope is { document, baseRevision }, NOT a bare
+      // Project. Validate the inner document only — validating the envelope itself
+      // would always 422 (the #1 autosave blocker).
+      const { document, baseRevision } = (request.body ?? {}) as {
+        document?: unknown;
+        baseRevision?: unknown;
+      };
+
+      const result = validateProject(document);
       if (!result.ok) {
         return reply
           .code(422)
@@ -173,17 +259,24 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
         });
       }
 
-      // Optional optimistic-concurrency check: if client sends baseRevision,
-      // reject if it doesn't match the stored revision.
-      const incoming = request.body as { baseRevision?: unknown };
+      // Optimistic-concurrency check: when the client sends baseRevision, reject
+      // if it doesn't match the stored revision. Undefined → skip the check.
       if (
-        incoming.baseRevision !== undefined &&
-        Number(incoming.baseRevision) !== existing.revision
+        baseRevision !== undefined &&
+        Number(baseRevision) !== existing.revision
       ) {
         return reply.code(409).send({
           error: 'RevisionConflict',
-          message: `baseRevision ${String(incoming.baseRevision)} does not match server revision ${existing.revision}`,
+          message: `baseRevision ${String(baseRevision)} does not match server revision ${existing.revision}`,
         });
+      }
+
+      // Server-side free-tier enforcement on the validated document.
+      const limitError = checkPlanLimits(result.value);
+      if (limitError) {
+        return reply
+          .code(422)
+          .send({ error: 'PlanLimitExceeded', message: limitError });
       }
 
       const now = new Date().toISOString();

@@ -1,8 +1,9 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useEditorStore } from '../../store/editorStore.js';
 import { Button, cx } from '../ui/index.js';
 import type { Track, CaptionBlock } from '@videoforge/project-schema';
-import { apiPresign, apiConfirmUpload, apiPollAssetReady, fileHash, type AssetRecord } from '../../lib/api.js';
+import { apiPresign, apiConfirmUpload, apiGetAsset, apiPollAssetReady, fileHash, type AssetRecord } from '../../lib/api.js';
+import { wsClient } from '../../lib/wsClient.js';
 
 // MediaPanel — left rail (§7.A). Three-section rail: Media / Text / Captions.
 // "Import media" does the full real S3 upload flow (presign → PUT → confirm →
@@ -109,6 +110,36 @@ export default function MediaPanel() {
   const updateAsset = useCallback((id: string, patch: Partial<MediaAsset>) => {
     setAssets((prev) => prev.map((a) => (a.id === id ? { ...a, ...patch } : a)));
   }, []);
+
+  // WebSocket push: flip a matching uploading/processing asset to ready the moment
+  // the backend broadcasts asset:ready, in addition to the HTTP poll fallback in
+  // uploadFile(). Matches by assetId; ignores events for assets we don't track.
+  useEffect(() => {
+    const off = wsClient.on('asset:ready', (payload) => {
+      const assetId = payload['assetId'];
+      if (typeof assetId !== 'string') return;
+      setAssets((prev) => {
+        const target = prev.find((a) => a.id === assetId);
+        // Ignore events for assets not in our library, or already settled.
+        if (!target || target.status === 'ready' || target.status === 'error') return prev;
+        // Optimistically flip to ready now; fetch the full record for URLs/duration.
+        void apiGetAsset(assetId)
+          .then((rec) => {
+            updateAsset(assetId, {
+              status: 'ready',
+              duration: durationLabel(rec.durationMs),
+              proxyUrl: rec.proxyUrl,
+              thumbnailUrl: rec.thumbnailUrl,
+            });
+          })
+          .catch(() => {
+            // The poll in uploadFile() remains the source of truth on fetch failure.
+          });
+        return prev.map((a) => (a.id === assetId ? { ...a, status: 'ready' } : a));
+      });
+    });
+    return off;
+  }, [updateAsset]);
 
   const uploadFile = useCallback(
     async (file: File) => {

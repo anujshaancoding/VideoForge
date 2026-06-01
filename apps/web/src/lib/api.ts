@@ -41,8 +41,16 @@ export async function apiCreateProject(body: { name: string; document: unknown }
   return request<ApiProject>('/projects', { method: 'POST', body: JSON.stringify(body) });
 }
 
-export async function apiPatchProject(id: string, body: { document: unknown; baseRevision: number }): Promise<ApiProject> {
-  return request<ApiProject>(`/projects/${id}`, { method: 'PATCH', body: JSON.stringify(body) });
+export interface PatchProjectResponse {
+  revision: number;
+  updatedAt: string;
+}
+
+export async function apiPatchProject(
+  id: string,
+  body: { document: unknown; baseRevision: number },
+): Promise<PatchProjectResponse> {
+  return request<PatchProjectResponse>(`/projects/${id}`, { method: 'PATCH', body: JSON.stringify(body) });
 }
 
 export async function apiDeleteProject(id: string): Promise<void> {
@@ -117,6 +125,9 @@ export interface ExportRecord {
   outputUrl: string | null;
   errorMessage: string | null;
   previewCommand?: string;
+  // Non-empty when a referenced clip's ORIGINAL asset is missing
+  // (proxy-downgrade warning, surfaced on the POST /exports response).
+  warnings?: string[];
 }
 
 export async function apiCreateExport(body: {

@@ -1,7 +1,8 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { selectProjectDurationMs, useEditorStore } from '../../store/editorStore.js';
 import { Button, cx, Modal } from '../ui/index.js';
 import { apiCreateExport, apiPollExportComplete, apiGetDownloadUrl } from '../../lib/api.js';
+import { wsClient } from '../../lib/wsClient.js';
 
 // ExportModal (§8.2) — MP4/H.264, ≤1080p Free-tier cap, social presets.
 // Real flow: POST /api/v1/exports → poll until COMPLETE → mint download URL.
@@ -47,9 +48,25 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
 
   const [phase, setPhase] = useState<Phase>('config');
   const [progress, setProgress] = useState(0);
+  const [etaSeconds, setEtaSeconds] = useState<number | null>(null);
+  const [warnings, setWarnings] = useState<string[]>([]);
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const abortRef = useRef(false);
+  // The export currently being tracked; WS handlers compare against this to
+  // ignore push events from older/unrelated exports (stale-closure guard).
+  const activeExportIdRef = useRef<string | null>(null);
+  // Cleanup callbacks for the WS subscriptions of the in-flight export.
+  const wsUnsubsRef = useRef<Array<() => void>>([]);
+
+  const teardownWs = useCallback(() => {
+    for (const off of wsUnsubsRef.current) off();
+    wsUnsubsRef.current = [];
+    activeExportIdRef.current = null;
+  }, []);
+
+  // Ensure we never leak WS handlers if the component unmounts mid-export.
+  useEffect(() => () => teardownWs(), [teardownWs]);
 
   const dims = useMemo(() => {
     const base =
@@ -69,9 +86,12 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
   const handleExport = useCallback(async () => {
     setPhase('exporting');
     setProgress(0);
+    setEtaSeconds(null);
     setErrorMsg(null);
     setDownloadUrl(null);
+    setWarnings([]);
     abortRef.current = false;
+    teardownWs();
 
     try {
       const rec = await apiCreateExport({
@@ -87,34 +107,73 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
         },
       });
 
-      const completed = await apiPollExportComplete(rec.exportId, (pct) => {
-        if (!abortRef.current) setProgress(pct);
+      // Surface proxy-downgrade warnings from the POST /exports response early.
+      if (rec.warnings && rec.warnings.length > 0) setWarnings(rec.warnings);
+
+      const exportId = rec.exportId;
+      activeExportIdRef.current = exportId;
+
+      // ── WebSocket push: resolves/rejects the terminal state, drives progress. ──
+      const wsTerminal = new Promise<{ outputUrl: string | null }>((resolve, reject) => {
+        const offProgress = wsClient.on('export:progress', (p) => {
+          // Ignore events for any other export (stale-closure guard).
+          if (p['exportId'] !== exportId || abortRef.current) return;
+          const pct = Number(p['progress']);
+          if (Number.isFinite(pct)) setProgress(Math.round(pct));
+          const eta = p['etaSeconds'];
+          setEtaSeconds(typeof eta === 'number' && Number.isFinite(eta) ? eta : null);
+        });
+        const offComplete = wsClient.on('export:complete', (p) => {
+          if (p['exportId'] !== exportId || abortRef.current) return;
+          // The complete event carries s3Key but not a signed URL; mint one below.
+          resolve({ outputUrl: null });
+        });
+        const offFailed = wsClient.on('export:failed', (p) => {
+          if (p['exportId'] !== exportId || abortRef.current) return;
+          reject(new Error((p['message'] as string) ?? 'Export failed'));
+        });
+        wsUnsubsRef.current.push(offProgress, offComplete, offFailed);
       });
+
+      // ── HTTP poll fallback: races the WS push; first terminal result wins. ──
+      const pollTerminal = apiPollExportComplete(exportId, (pct) => {
+        if (!abortRef.current) setProgress(pct);
+      }).then((completed) => ({ outputUrl: completed.outputUrl }));
+
+      const settled = await Promise.race([wsTerminal, pollTerminal]);
+
+      // Stop listening once a terminal state is reached.
+      teardownWs();
 
       if (abortRef.current) return;
 
-      if (completed.outputUrl) {
-        setDownloadUrl(completed.outputUrl);
+      if (settled.outputUrl) {
+        setDownloadUrl(settled.outputUrl);
         setPhase('done');
         return;
       }
 
-      // Mint a fresh signed URL
-      const { downloadUrl: url } = await apiGetDownloadUrl(rec.exportId);
+      // Mint a fresh signed URL (WS complete path, or poll without outputUrl).
+      const { downloadUrl: url } = await apiGetDownloadUrl(exportId);
+      if (abortRef.current) return;
       setDownloadUrl(url);
       setPhase('done');
     } catch (err) {
+      teardownWs();
       if (!abortRef.current) {
         setErrorMsg(err instanceof Error ? err.message : String(err));
         setPhase('error');
       }
     }
-  }, [project.id, dims, fps, captions, hasCaptions]);
+  }, [project.id, dims, fps, captions, hasCaptions, teardownWs]);
 
   const handleClose = () => {
     abortRef.current = true;
+    teardownWs();
     setPhase('config');
     setProgress(0);
+    setEtaSeconds(null);
+    setWarnings([]);
     setDownloadUrl(null);
     setErrorMsg(null);
     onClose();
@@ -165,9 +224,22 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
               style={{ width: `${progress}%` }}
             />
           </div>
-          <p className="text-sm text-vf-text-secondary">
+          <p className="text-sm text-vf-text-secondary" aria-live="polite">
             {progress > 0 ? `${progress}% — rendering…` : 'Queued, waiting for worker…'}
+            {etaSeconds != null && etaSeconds > 0 && (
+              <span className="ml-1 text-vf-text-tertiary vf-tnum">~{etaSeconds}s left</span>
+            )}
           </p>
+          {warnings.length > 0 && (
+            <div className="flex w-full items-start gap-2 rounded-md border border-vf-warning-fg/40 bg-vf-surface-2 p-3 text-2xs text-vf-text-secondary">
+              <span aria-hidden="true" className="text-vf-warning-fg">⚠</span>
+              <div>
+                {warnings.map((w, i) => (
+                  <p key={i}>{w}</p>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -178,6 +250,16 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
           <p className="text-sm text-vf-text-secondary">
             Available for download for 7 days. Each click mints a fresh 1-hour link.
           </p>
+          {warnings.length > 0 && (
+            <div className="flex w-full items-start gap-2 rounded-md border border-vf-warning-fg/40 bg-vf-surface-2 p-3 text-left text-2xs text-vf-text-secondary">
+              <span aria-hidden="true" className="text-vf-warning-fg">⚠</span>
+              <div>
+                {warnings.map((w, i) => (
+                  <p key={i}>{w}</p>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 

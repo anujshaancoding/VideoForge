@@ -11,7 +11,7 @@ import {
   EditorErrorBoundary,
 } from "../components/editor/index.js";
 import { useEditorStore } from "../store/editorStore.js";
-import { getProjectSync as getProject } from "../lib/projectStore.js";
+import { getProject } from "../lib/projectStore.js";
 import { Button } from "../components/ui/index.js";
 import { previewEngine } from "../engine/index.js";
 import { wsClient } from "../lib/wsClient.js";
@@ -38,17 +38,40 @@ export default function Editor() {
   const loadProject = useEditorStore((s) => s.loadProject);
   const currentId = useEditorStore((s) => s.project.id);
   const [notFound, setNotFound] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (!id) return;
-    if (id === currentId) return; // already loaded
-    const project = getProject(id);
-    if (project) {
-      loadProject(project);
+    if (id === currentId) {
+      // already loaded into the store
+      setLoading(false);
       setNotFound(false);
-    } else {
-      setNotFound(true);
+      return;
     }
+
+    let cancelled = false;
+    setLoading(true);
+    setNotFound(false);
+    getProject(id)
+      .then((project) => {
+        if (cancelled) return;
+        if (project) {
+          loadProject(project);
+          setNotFound(false);
+        } else {
+          setNotFound(true);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setNotFound(true);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [id, currentId, loadProject]);
 
   // Connect WebSocket hub for asset:ready + export progress push events.
@@ -137,6 +160,18 @@ export default function Editor() {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [handleKeyDown]);
+
+  if (loading && !notFound) {
+    return (
+      <main
+        role="status"
+        aria-live="polite"
+        className="flex h-full flex-col items-center justify-center gap-4 bg-vf-bg-app text-center"
+      >
+        <p className="text-sm text-vf-text-secondary">Loading project…</p>
+      </main>
+    );
+  }
 
   if (notFound) {
     return (

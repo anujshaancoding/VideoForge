@@ -27,6 +27,7 @@ import {
 export const MEDIA_QUEUE = 'media';
 
 const FFMPEG_PATH = process.env['FFMPEG_PATH'] ?? 'ffmpeg';
+const FFPROBE_PATH = process.env['FFPROBE_PATH'] ?? 'ffprobe';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Job data type
@@ -107,6 +108,91 @@ async function runFfmpeg(args: string[], label: string): Promise<void> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// FFprobe metadata
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Extracted media metadata. Any field may be null when ffprobe can't supply it. */
+export interface ProbeMetadata {
+  durationMs: number | null;
+  width: number | null;
+  height: number | null;
+}
+
+/** Minimal shape of the ffprobe JSON we consume. */
+interface FfprobeJson {
+  format?: { duration?: string | number };
+  streams?: Array<{ codec_type?: string; width?: number; height?: number }>;
+}
+
+/** Run ffprobe and collect its JSON stdout. Rejects on spawn error / non-zero exit. */
+async function runFfprobe(inputPath: string): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const child = spawn(
+      FFPROBE_PATH,
+      ['-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', inputPath],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+
+    const stdoutChunks: Buffer[] = [];
+    child.stdout.on('data', (chunk: Buffer) => stdoutChunks.push(chunk));
+    child.stderr.on('data', () => undefined);
+
+    child.on('close', (code) => {
+      if (code === 0) {
+        resolve(Buffer.concat(stdoutChunks).toString());
+      } else {
+        reject(new Error(`ffprobe exited ${String(code)}`));
+      }
+    });
+
+    child.on('error', (err) => {
+      reject(new Error(`failed to spawn ffprobe: ${err.message}`));
+    });
+  });
+}
+
+/**
+ * Probe a media file for duration (ms) and video width/height.
+ *
+ * Robust by design: any failure (ffprobe missing, non-zero exit, malformed JSON,
+ * absent fields) returns nulls so the import job can still complete. The first
+ * video stream supplies width/height; format.duration (seconds) is rounded to ms.
+ */
+async function probeMetadata(inputPath: string, assetId: string): Promise<ProbeMetadata> {
+  const empty: ProbeMetadata = { durationMs: null, width: null, height: null };
+  try {
+    const raw = await runFfprobe(inputPath);
+    const parsed = JSON.parse(raw) as FfprobeJson;
+
+    let durationMs: number | null = null;
+    const rawDuration = parsed.format?.duration;
+    const durationSec =
+      typeof rawDuration === 'number' ? rawDuration : Number.parseFloat(rawDuration ?? '');
+    if (Number.isFinite(durationSec) && durationSec >= 0) {
+      durationMs = Math.round(durationSec * 1000);
+    }
+
+    let width: number | null = null;
+    let height: number | null = null;
+    const videoStream = parsed.streams?.find((s) => s.codec_type === 'video');
+    if (videoStream) {
+      if (typeof videoStream.width === 'number' && Number.isFinite(videoStream.width)) {
+        width = videoStream.width;
+      }
+      if (typeof videoStream.height === 'number' && Number.isFinite(videoStream.height)) {
+        height = videoStream.height;
+      }
+    }
+
+    return { durationMs, width, height };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`[media-worker] ${assetId}: ffprobe failed, metadata unknown: ${message}`);
+    return empty;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Waveform
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -141,6 +227,10 @@ export async function processMediaJob(job: Job<MediaJobData>): Promise<void> {
     console.info(`[media-worker] ${assetId}: downloading original (${contentType})`);
     const inputPath = await downloadFromS3(BUCKET_ORIGINALS, s3KeyOriginal);
     tempFiles.push(inputPath);
+
+    // 1b. Probe the original for real duration / dimensions before transcoding.
+    //     Never fatal: missing fields fall through as null.
+    const metadata = await probeMetadata(inputPath, assetId);
 
     let proxyKey: string | undefined;
     let thumbnailKey: string | undefined;
@@ -211,8 +301,19 @@ export async function processMediaJob(job: Job<MediaJobData>): Promise<void> {
       await uploadToS3(waveformPath, BUCKET_PROXIES, waveformKey, 'application/json');
     }
 
-    // Publish asset:ready. The API subscriber persists these keys to Postgres
-    // (status PROCESSING → READY) and broadcasts to the workspace WS room.
+    // Per-content-type metadata: audio has no spatial dimensions; images have no
+    // duration; video carries all three. Only include fields we actually probed.
+    const metaFields: { durationMs?: number; width?: number; height?: number } = {};
+    if (!isImage && typeof metadata.durationMs === 'number') {
+      metaFields.durationMs = metadata.durationMs;
+    }
+    if (!isAudio) {
+      if (typeof metadata.width === 'number') metaFields.width = metadata.width;
+      if (typeof metadata.height === 'number') metaFields.height = metadata.height;
+    }
+
+    // Publish asset:ready. The API subscriber persists these keys + metadata to
+    // Postgres (status PROCESSING → READY) and broadcasts to the workspace WS room.
     await redis.publish(
       'asset:ready',
       JSON.stringify({
@@ -222,6 +323,7 @@ export async function processMediaJob(job: Job<MediaJobData>): Promise<void> {
         ...(proxyKey ? { proxyKey } : {}),
         ...(thumbnailKey ? { thumbnailKey } : {}),
         ...(waveformKey ? { waveformKey } : {}),
+        ...metaFields,
       }),
     );
 

@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { createProjectSync as createProject } from "../lib/projectStore.js";
+import { createProject } from "../lib/projectStore.js";
 import { Button, Field, Modal } from "../components/ui/index.js";
 import { cx } from "../components/ui/cx.js";
 
@@ -142,14 +142,20 @@ export default function NewProjectModal() {
     }
   };
 
-  const handleCreate = useCallback(() => {
+  const handleCreate = useCallback(async () => {
     if (!canCreate || selected === null) return;
     const preset = PRESETS.find((p) => p.id === selected)!;
     const width = selected === "custom" ? customValidation.w : preset.width;
     const height = selected === "custom" ? customValidation.h : preset.height;
     setCreating(true);
-    const project = createProject({ title, width, height });
-    navigate(`/editor/${project.id}`);
+    try {
+      const project = await createProject({ title, width, height });
+      navigate(`/editor/${project.id}`);
+    } catch {
+      // createProject falls back to localStorage on network error and only
+      // rejects on unexpected failures — re-enable the button so the user can retry.
+      setCreating(false);
+    }
   }, [canCreate, selected, customValidation, title, navigate]);
 
   // First tile owns the tabindex when nothing is chosen; otherwise the chosen tile.

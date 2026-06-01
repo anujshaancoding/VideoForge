@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  deleteProjectSync as deleteProject,
-  duplicateProjectSync as duplicateProject,
-  listProjectsSync as listProjects,
+  deleteProject,
+  duplicateProject,
+  listProjects,
   relativeTime,
   type ProjectSummary,
 } from "../lib/projectStore.js";
@@ -160,30 +160,52 @@ function ProjectCard({
 export default function Dashboard() {
   const navigate = useNavigate();
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<ProjectSummary | null>(null);
 
-  const refresh = useCallback(() => setProjects(listProjects()), []);
-  useEffect(() => refresh(), [refresh]);
+  const refresh = useCallback(async () => {
+    const items = await listProjects();
+    setProjects(items);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    listProjects()
+      .then((items) => {
+        if (!cancelled) setProjects(items);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleDuplicate = useCallback(
-    (id: string) => {
+    async (id: string) => {
       setBusyId(id);
-      duplicateProject(id);
-      refresh();
-      setBusyId(null);
+      try {
+        await duplicateProject(id);
+        await refresh();
+      } finally {
+        setBusyId(null);
+      }
     },
     [refresh],
   );
 
-  const confirmDelete = useCallback(() => {
+  const confirmDelete = useCallback(async () => {
     if (!pendingDelete) return;
-    deleteProject(pendingDelete.id);
+    const id = pendingDelete.id;
     setPendingDelete(null);
-    refresh();
+    await deleteProject(id);
+    await refresh();
   }, [pendingDelete, refresh]);
 
-  const isEmpty = projects.length === 0;
+  const isEmpty = !loading && projects.length === 0;
 
   return (
     <div className="flex min-h-full flex-col bg-vf-bg-app">
@@ -211,7 +233,15 @@ export default function Dashboard() {
       </header>
 
       <main className="flex-1 px-6 py-8">
-        {isEmpty ? (
+        {loading ? (
+          <div
+            role="status"
+            aria-live="polite"
+            className="mx-auto flex max-w-[560px] flex-col items-center py-20 text-center text-sm text-vf-text-secondary"
+          >
+            Loading your projects…
+          </div>
+        ) : isEmpty ? (
           <div className="mx-auto flex max-w-[560px] flex-col items-center py-20 text-center">
             <div
               aria-hidden="true"

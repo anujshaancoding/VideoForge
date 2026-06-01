@@ -33,6 +33,26 @@ function collectAssetIds(project: Project): string[] {
   return [...ids];
 }
 
+/** Free-tier export resolution cap: short edge (min of w/h) ≤ 1080 (MVP_Scope §3.10). */
+const MAX_SHORT_EDGE = 1080;
+
+/**
+ * Clamp an export resolution so its short edge ≤ {@link MAX_SHORT_EDGE},
+ * preserving aspect ratio. Returns the input unchanged when already within cap.
+ */
+function clampResolution(res: { w: number; h: number }): { w: number; h: number } {
+  const w = Number(res.w);
+  const h = Number(res.h);
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) {
+    // Degenerate input — fall back to a portrait 1080 short edge.
+    return { w: 1080, h: 1920 };
+  }
+  const shortEdge = Math.min(w, h);
+  if (shortEdge <= MAX_SHORT_EDGE) return { w: Math.round(w), h: Math.round(h) };
+  const scale = MAX_SHORT_EDGE / shortEdge;
+  return { w: Math.round(w * scale), h: Math.round(h * scale) };
+}
+
 /** Free-tier MVP export defaults (MP4/H.264 ≤1080p, watermark on). */
 const DEFAULT_EXPORT_SETTINGS: ExportSettings = {
   format: 'mp4',
@@ -113,6 +133,10 @@ export async function exportRoutes(app: FastifyInstance): Promise<void> {
       ...(body.settings ?? {}),
     };
 
+    // Server-side free-tier resolution clamp: short edge ≤ 1080p. Never trust the
+    // client's resolution; downscale (keeping aspect ratio) when it exceeds the cap.
+    mergedSettings.resolution = clampResolution(mergedSettings.resolution);
+
     try {
       buildExportCommand(project, mergedSettings);
     } catch (err) {
@@ -148,6 +172,18 @@ export async function exportRoutes(app: FastifyInstance): Promise<void> {
       }
     }
 
+    // Proxy-downgrade warnings: every referenced asset whose ORIGINAL is missing
+    // (only a proxy survives, or the asset row is gone) renders from a lower-quality
+    // proxy. We only have the assetId here, so the message keys off that.
+    const warnings: string[] = [];
+    for (const assetId of assetIds) {
+      if (!s3Keys[assetId]?.original) {
+        warnings.push(
+          `${assetId} will export from its proxy (lower quality)`,
+        );
+      }
+    }
+
     const exportId = randomUUID();
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
 
@@ -171,7 +207,7 @@ export async function exportRoutes(app: FastifyInstance): Promise<void> {
     };
     await renderQueue.add('render', jobData);
 
-    return reply.code(201).send({ exportId, status: 'QUEUED' });
+    return reply.code(201).send({ exportId, status: 'QUEUED', warnings });
   });
 
   // GET /api/v1/exports/:id — poll status.
