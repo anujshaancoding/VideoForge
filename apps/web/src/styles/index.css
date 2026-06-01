@@ -1,0 +1,44 @@
+/* VideoForge global stylesheet — tokens first, then Tailwind layers, then globals. */
+@import "./tokens.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background-color: var(--vf-bg-app);
+    color: var(--vf-text-primary);
+    font-family: var(--vf-font-sans);
+    font-size: 0.8125rem; /* §2.6 default UI body = 13px */
+    font-weight: var(--vf-weight-medium);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Tabular figures everywhere we render timecode / numeric fields (§2.6). */
+  .vf-tnum {
+    font-family: var(--vf-font-mono);
+    font-feature-settings: "tnum" 1;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* §2.9 / §19.4 — first-class focus ring, keyboard/AT only, never globally removed. */
+  :focus-visible {
+    outline: var(--vf-stroke-default) solid var(--vf-focus-ring-color);
+    outline-offset: 2px;
+  }
+
+  /* App is dark-only for MVP; keep native form controls on the dark scheme. */
+  :root {
+    color-scheme: dark;
+  }
+}

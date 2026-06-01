@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "extends": "./tsconfig.base.json",
+  "_note": "No .ts sources here (the package ships a JSON tsconfig + a .cjs Tailwind preset). This stub keeps the package valid under `pnpm -r build`/`typecheck` and the root project references.",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "dist",
+    "noEmit": false,
+    "allowJs": false
+  },
+  "files": []
+}

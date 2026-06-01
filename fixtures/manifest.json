@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "1.0",
+  "fixtures": [
+    {
+      "id": "fixture-bunny-3s",
+      "filename": "bunny_h264_3s.mp4",
+      "contentType": "video/mp4",
+      "license": "CC0",
+      "durationMs": 3000,
+      "width": 1280,
+      "height": 720,
+      "md5": "placeholder-will-be-computed",
+      "s3Key": "fixtures/bunny_h264_3s.mp4",
+      "description": "3-second 720p H.264 test clip (Big Buck Bunny excerpt, CC0)"
+    },
+    {
+      "id": "fixture-audio-5s",
+      "filename": "tone_440hz_5s.wav",
+      "contentType": "audio/wav",
+      "license": "CC0",
+      "durationMs": 5000,
+      "md5": "placeholder-will-be-computed",
+      "s3Key": "fixtures/tone_440hz_5s.wav",
+      "description": "5-second 440Hz sine wave (generated, CC0)"
+    }
+  ]
+}

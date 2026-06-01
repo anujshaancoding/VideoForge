@@ -1,0 +1,30 @@
+{
+  "name": "@videoforge/config",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared VideoForge config: tsconfig base + Tailwind preset mapping the --vf-* design tokens.",
+  "exports": {
+    "./tsconfig.base.json": "./tsconfig.base.json",
+    "./tailwind-preset": "./tailwind-preset.cjs",
+    "./tailwind-preset.cjs": "./tailwind-preset.cjs"
+  },
+  "files": [
+    "tsconfig.base.json",
+    "tailwind-preset.cjs"
+  ],
+  "scripts": {
+    "build": "echo \"@videoforge/config is config-only (no build)\" && exit 0",
+    "typecheck": "echo \"@videoforge/config is config-only (no typecheck)\" && exit 0",
+    "test": "echo \"no tests in @videoforge/config\" && exit 0",
+    "lint": "echo \"no lint config in @videoforge/config\" && exit 0"
+  },
+  "peerDependencies": {
+    "tailwindcss": "^3.4.0"
+  },
+  "peerDependenciesMeta": {
+    "tailwindcss": {
+      "optional": true
+    }
+  }
+}

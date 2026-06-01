@@ -1,0 +1,51 @@
+{
+  "name": "@videoforge/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "VideoForge API — Fastify M1 backend with Postgres, S3, BullMQ, and WebSocket.",
+  "exports": {
+    ".": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.js"
+    }
+  },
+  "main": "./dist/server.js",
+  "types": "./dist/server.d.ts",
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "echo \"no tests in @videoforge/api\" && exit 0",
+    "lint": "echo \"no lint config in @videoforge/api\" && exit 0",
+    "db:generate": "drizzle-kit generate --config drizzle.config.ts",
+    "db:migrate": "tsx src/db/migrate.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.600.0",
+    "@aws-sdk/s3-request-presigner": "^3.600.0",
+    "@fastify/cookie": "^9.3.1",
+    "@fastify/cors": "^9.0.1",
+    "@fastify/jwt": "^8.0.0",
+    "@fastify/websocket": "^8.3.1",
+    "@videoforge/ffmpeg-graph": "workspace:*",
+    "@videoforge/project-schema": "workspace:*",
+    "bullmq": "^5.12.0",
+    "drizzle-orm": "^0.31.0",
+    "fastify": "^4.28.1",
+    "ioredis": "^5.4.1",
+    "postgres": "^3.4.4"
+  },
+  "devDependencies": {
+    "@videoforge/config": "workspace:*",
+    "@types/node": "^20.14.0",
+    "drizzle-kit": "^0.22.0",
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.4"
+  }
+}

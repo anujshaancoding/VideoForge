@@ -1,0 +1,348 @@
+import { useCallback, useMemo, useRef, useState } from 'react';
+import { selectProjectDurationMs, useEditorStore } from '../../store/editorStore.js';
+import { Button, cx, Modal } from '../ui/index.js';
+import { apiCreateExport, apiPollExportComplete, apiGetDownloadUrl } from '../../lib/api.js';
+
+// ExportModal (§8.2) — MP4/H.264, ≤1080p Free-tier cap, social presets.
+// Real flow: POST /api/v1/exports → poll until COMPLETE → mint download URL.
+
+type Preset = '9:16' | '16:9' | 'custom';
+type CaptionMode = 'none' | 'burn' | 'sidecar';
+type Phase = 'config' | 'exporting' | 'done' | 'error';
+
+const PRESETS: Record<Exclude<Preset, 'custom'>, { w: number; h: number; label: string }> = {
+  '9:16': { w: 1080, h: 1920, label: 'TikTok / Reels' },
+  '16:9': { w: 1920, h: 1080, label: 'YouTube' },
+};
+
+function estimateSizeMb(w: number, h: number, fps: number, durationMs: number): number {
+  const mbitps = Math.max(1, (w * h * fps) / 2_000_000);
+  return Math.max(1, Math.round((mbitps * durationMs) / 8_000));
+}
+
+function estimateTimeLabel(durationMs: number): string {
+  const renderSec = Math.max(1, Math.round(durationMs / 4000));
+  return renderSec < 90 ? `~ ${renderSec} sec` : `~ ${Math.round(renderSec / 60)} min`;
+}
+
+interface ExportModalProps {
+  open: boolean;
+  onClose: () => void;
+}
+
+export default function ExportModal({ open, onClose }: ExportModalProps) {
+  const project = useEditorStore((s) => s.project);
+  const durationMs = useEditorStore(selectProjectDurationMs);
+  const hasCaptions = useEditorStore((s) => (s.project.captionTracks[0]?.blocks.length ?? 0) > 0);
+
+  const initialPreset: Preset =
+    project.canvas.aspectRatio === '16:9' ? '16:9' : project.canvas.aspectRatio === '9:16' ? '9:16' : 'custom';
+
+  const [tab, setTab] = useState<'format' | 'captions'>('format');
+  const [preset, setPreset] = useState<Preset>(initialPreset);
+  const [resolution, setResolution] = useState<'720p' | '1080p'>('1080p');
+  const [fps, setFps] = useState(project.canvas.frameRate);
+  const [captions, setCaptions] = useState<CaptionMode>(hasCaptions ? 'burn' : 'none');
+  const [sidecarFmt, setSidecarFmt] = useState<'.srt' | '.vtt'>('.srt');
+
+  const [phase, setPhase] = useState<Phase>('config');
+  const [progress, setProgress] = useState(0);
+  const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const abortRef = useRef(false);
+
+  const dims = useMemo(() => {
+    const base =
+      preset === 'custom'
+        ? { w: project.canvas.width, h: project.canvas.height }
+        : PRESETS[preset];
+    const cap = resolution === '720p' ? 720 : 1080;
+    const short = Math.min(base.w, base.h);
+    if (short <= cap) return base;
+    const scale = cap / short;
+    return { w: Math.round(base.w * scale), h: Math.round(base.h * scale) };
+  }, [preset, resolution, project.canvas.width, project.canvas.height]);
+
+  const sizeMb = estimateSizeMb(dims.w, dims.h, fps, durationMs);
+  const overCap = Math.min(project.canvas.width, project.canvas.height) > 1080;
+
+  const handleExport = useCallback(async () => {
+    setPhase('exporting');
+    setProgress(0);
+    setErrorMsg(null);
+    setDownloadUrl(null);
+    abortRef.current = false;
+
+    try {
+      const rec = await apiCreateExport({
+        projectId: project.id,
+        settings: {
+          format: 'mp4',
+          videoCodec: 'h264',
+          resolution: { w: dims.w, h: dims.h },
+          fps,
+          crf: 18,
+          captions: hasCaptions ? captions : 'none',
+          watermark: true,
+        },
+      });
+
+      const completed = await apiPollExportComplete(rec.exportId, (pct) => {
+        if (!abortRef.current) setProgress(pct);
+      });
+
+      if (abortRef.current) return;
+
+      if (completed.outputUrl) {
+        setDownloadUrl(completed.outputUrl);
+        setPhase('done');
+        return;
+      }
+
+      // Mint a fresh signed URL
+      const { downloadUrl: url } = await apiGetDownloadUrl(rec.exportId);
+      setDownloadUrl(url);
+      setPhase('done');
+    } catch (err) {
+      if (!abortRef.current) {
+        setErrorMsg(err instanceof Error ? err.message : String(err));
+        setPhase('error');
+      }
+    }
+  }, [project.id, dims, fps, captions, hasCaptions]);
+
+  const handleClose = () => {
+    abortRef.current = true;
+    setPhase('config');
+    setProgress(0);
+    setDownloadUrl(null);
+    setErrorMsg(null);
+    onClose();
+  };
+
+  return (
+    <Modal
+      open={open}
+      onClose={handleClose}
+      title="Export video"
+      widthClassName="max-w-[560px]"
+      footer={
+        phase === 'config' ? (
+          <>
+            <Button variant="ghost" onClick={handleClose}>Cancel</Button>
+            <Button variant="primary" onClick={handleExport}>Export</Button>
+          </>
+        ) : phase === 'exporting' ? (
+          <Button variant="ghost" onClick={handleClose}>Cancel</Button>
+        ) : phase === 'done' ? (
+          <>
+            <Button variant="ghost" onClick={handleClose}>Close</Button>
+            {downloadUrl && (
+              <a
+                href={downloadUrl}
+                download="export.mp4"
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-vf-accent px-3 text-sm font-medium text-vf-text-inverse hover:bg-vf-accent-hover"
+              >
+                Download MP4
+              </a>
+            )}
+          </>
+        ) : (
+          <>
+            <Button variant="ghost" onClick={handleClose}>Close</Button>
+            <Button variant="primary" onClick={() => setPhase('config')}>Try again</Button>
+          </>
+        )
+      }
+    >
+      {phase === 'exporting' && (
+        <div className="flex flex-col items-center gap-4 py-8">
+          <div className="h-2 w-full overflow-hidden rounded-full bg-vf-surface-3">
+            <div
+              className="h-full rounded-full bg-vf-accent transition-all duration-500"
+              style={{ width: `${progress}%` }}
+            />
+          </div>
+          <p className="text-sm text-vf-text-secondary">
+            {progress > 0 ? `${progress}% — rendering…` : 'Queued, waiting for worker…'}
+          </p>
+        </div>
+      )}
+
+      {phase === 'done' && (
+        <div className="flex flex-col items-center gap-3 py-8 text-center">
+          <span aria-hidden="true" className="text-4xl">✅</span>
+          <p className="text-base font-medium text-vf-text-primary">Your export is ready</p>
+          <p className="text-sm text-vf-text-secondary">
+            Available for download for 7 days. Each click mints a fresh 1-hour link.
+          </p>
+        </div>
+      )}
+
+      {phase === 'error' && (
+        <div className="flex flex-col items-center gap-3 py-8 text-center">
+          <span aria-hidden="true" className="text-4xl">❌</span>
+          <p className="text-base font-medium text-vf-danger-fg">Export failed</p>
+          <p className="max-w-sm break-all text-sm text-vf-text-secondary">{errorMsg}</p>
+        </div>
+      )}
+
+      {phase === 'config' && (
+        <>
+          {/* Tabs */}
+          <div role="tablist" aria-label="Export settings" className="mb-4 flex gap-1 border-b border-vf-border-subtle">
+            {([['format', 'Format & Quality'], ['captions', 'Captions']] as Array<['format' | 'captions', string]>).map(
+              ([key, label]) => (
+                <button
+                  key={key}
+                  role="tab"
+                  aria-selected={tab === key}
+                  onClick={() => setTab(key)}
+                  className={cx(
+                    '-mb-px flex items-center gap-1 px-3 py-2 text-sm',
+                    tab === key
+                      ? 'border-b-2 border-vf-accent text-vf-text-primary'
+                      : 'text-vf-text-secondary hover:text-vf-text-primary',
+                  )}
+                >
+                  {label}
+                  {key === 'captions' && hasCaptions && captions !== 'none' && (
+                    <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-vf-accent" />
+                  )}
+                </button>
+              ),
+            )}
+          </div>
+
+          {tab === 'format' ? (
+            <div className="flex flex-col gap-4">
+              <fieldset>
+                <legend className="mb-2 text-xs font-medium text-vf-text-secondary">Preset</legend>
+                <div className="grid grid-cols-3 gap-2">
+                  {(['9:16', '16:9', 'custom'] as Preset[]).map((p) => {
+                    const meta = p === 'custom' ? null : PRESETS[p];
+                    return (
+                      <button
+                        key={p}
+                        type="button"
+                        aria-pressed={preset === p}
+                        onClick={() => setPreset(p)}
+                        className={cx(
+                          'flex flex-col gap-0.5 rounded-md border p-3 text-left text-xs',
+                          preset === p
+                            ? 'border-vf-accent bg-vf-accent-subtle'
+                            : 'border-vf-border-default bg-vf-surface-2 hover:border-vf-border-strong',
+                        )}
+                      >
+                        <span className="font-medium text-vf-text-primary">{p === 'custom' ? '⚙ Custom' : p}</span>
+                        <span className="text-2xs text-vf-text-tertiary">
+                          {meta ? `${meta.label} · ${meta.w}×${meta.h}` : 'match project'}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </fieldset>
+
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-vf-text-secondary">Format</span>
+                <span className="text-xs text-vf-text-tertiary">MP4 · H.264</span>
+              </div>
+
+              <label className="flex items-center justify-between">
+                <span className="text-xs text-vf-text-secondary">Resolution</span>
+                <select
+                  value={resolution}
+                  onChange={(e) => setResolution(e.target.value as '720p' | '1080p')}
+                  className="h-8 rounded-sm border border-vf-border-default bg-vf-surface-2 px-2 text-xs text-vf-text-primary"
+                >
+                  <option value="720p">720p</option>
+                  <option value="1080p">1080p (max on your plan)</option>
+                </select>
+              </label>
+
+              <label className="flex items-center justify-between">
+                <span className="text-xs text-vf-text-secondary">Frame rate</span>
+                <select
+                  value={fps}
+                  onChange={(e) => setFps(Number(e.target.value))}
+                  className="h-8 rounded-sm border border-vf-border-default bg-vf-surface-2 px-2 text-xs text-vf-text-primary"
+                >
+                  {[24, 25, 30].map((f) => (
+                    <option key={f} value={f}>{f} fps</option>
+                  ))}
+                </select>
+              </label>
+
+              <div className="flex items-start gap-2 rounded-md border border-vf-border-subtle bg-vf-surface-2 p-3 text-2xs text-vf-text-secondary">
+                <span aria-hidden="true" className="text-vf-info-fg">ⓘ</span>
+                <span>A small VideoForge watermark is added to exports on the free plan (bottom-right).</span>
+              </div>
+
+              {overCap && (
+                <p className="text-2xs text-vf-text-tertiary">Canvas exceeds 1080p — export will be scaled down.</p>
+              )}
+
+              <div className="flex items-center justify-between rounded-md bg-vf-surface-sunken px-3 py-2 text-xs">
+                <span className="text-vf-text-secondary">
+                  Est. size <span className="vf-tnum text-vf-text-primary">~ {sizeMb} MB</span>
+                </span>
+                <span className="text-vf-text-secondary">
+                  Est. time <span className="vf-tnum text-vf-text-primary">{estimateTimeLabel(durationMs)}</span>
+                </span>
+              </div>
+            </div>
+          ) : (
+            <div className="flex flex-col gap-3">
+              <p className="text-sm text-vf-text-secondary">How should captions be exported?</p>
+              {(['none', 'burn', 'sidecar'] as CaptionMode[]).map((val) => {
+                const labels: Record<CaptionMode, [string, string]> = {
+                  none: ['None', 'No captions in the output.'],
+                  burn: ['Burned-in', 'Permanently drawn onto the video.'],
+                  sidecar: ['Sidecar file', 'A separate .srt or .vtt download.'],
+                };
+                const [label, desc] = labels[val];
+                const disabled = val !== 'none' && !hasCaptions;
+                return (
+                  <label
+                    key={val}
+                    className={cx(
+                      'flex items-start gap-2 rounded-md border p-3',
+                      captions === val ? 'border-vf-accent' : 'border-vf-border-subtle',
+                      disabled ? 'opacity-50' : 'cursor-pointer hover:border-vf-border-strong',
+                    )}
+                  >
+                    <input
+                      type="radio"
+                      name="captions"
+                      checked={captions === val}
+                      disabled={disabled}
+                      onChange={() => setCaptions(val)}
+                      className="mt-0.5 accent-vf-accent"
+                    />
+                    <div>
+                      <div className="text-sm text-vf-text-primary">{label}</div>
+                      <div className="text-2xs text-vf-text-tertiary">{desc}</div>
+                      {val === 'sidecar' && captions === 'sidecar' && (
+                        <select
+                          value={sidecarFmt}
+                          onChange={(e) => setSidecarFmt(e.target.value as '.srt' | '.vtt')}
+                          className="mt-2 h-7 rounded-sm border border-vf-border-default bg-vf-surface-2 px-2 text-2xs"
+                        >
+                          <option value=".srt">.srt</option>
+                          <option value=".vtt">.vtt</option>
+                        </select>
+                      )}
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+        </>
+      )}
+    </Modal>
+  );
+}

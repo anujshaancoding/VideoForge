@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "files": [],
+  "references": [
+    { "path": "packages/config" },
+    { "path": "packages/project-schema" },
+    { "path": "packages/ffmpeg-graph" },
+    { "path": "apps/web" },
+    { "path": "apps/api" },
+    { "path": "apps/render-worker" }
+  ]
+}
