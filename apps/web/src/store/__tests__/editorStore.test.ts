@@ -174,16 +174,53 @@ describe("moveClip", () => {
 });
 
 describe("duplicateSelected", () => {
-  it("inserts an unlinked copy directly after the original and selects it", () => {
-    get().select("clip", videoClipA); // 0–4000
+  it("inserts an unlinked copy in the first free slot after the original and selects it", () => {
+    // videoClipA is 0–4000; videoClipB occupies 3500–8000 (packed/overlapping). A
+    // copy of A (span 4000) can't sit at 4000 (would overlap B) → first free slot is
+    // 8000 (after B). This pins the overlap fix.
+    get().select("clip", videoClipA);
     get().duplicateSelected();
     const p = get().project;
     const vt = trackByType(p, "video") as Extract<Track, { clips: Clip[] }>;
     expect(vt.clips.length).toBe(3);
     const copy = findClip(p, get().selection.id!)!;
-    expect(copy.startOnTimeline).toBe(4000); // appended after the original end
-    expect(copy.endOnTimeline).toBe(8000);
+    expect(copy.startOnTimeline).toBe(8000); // first free slot past the overlapping next clip
+    expect(copy.endOnTimeline).toBe(12000);
     expect(copy.linkedClipId).toBeNull();
+    // The copy never overlaps any sibling clip on the track.
+    const siblings = vt.clips.filter((c) => c.id !== copy.id);
+    for (const s of siblings) {
+      const overlaps = copy.startOnTimeline < s.endOnTimeline && s.startOnTimeline < copy.endOnTimeline;
+      expect(overlaps).toBe(false);
+    }
+  });
+});
+
+describe("setClipSpeed", () => {
+  it("sets the clip's speed field (the value the export graph consumes)", () => {
+    get().setClipSpeed(videoClipA, videoTrackId, 2);
+    expect(findClip(get().project, videoClipA)!.speed).toBe(2);
+  });
+
+  it("clamps to the 0.1×–16× MVP range", () => {
+    get().setClipSpeed(videoClipA, videoTrackId, 99);
+    expect(findClip(get().project, videoClipA)!.speed).toBe(16);
+    get().setClipSpeed(videoClipA, videoTrackId, 0);
+    expect(findClip(get().project, videoClipA)!.speed).toBe(0.1);
+  });
+
+  it("guards against NaN (schema requires speed > 0) and is undoable", () => {
+    const original = findClip(get().project, videoClipA)!.speed;
+    get().setClipSpeed(videoClipA, videoTrackId, Number.NaN);
+    expect(findClip(get().project, videoClipA)!.speed).toBe(1);
+    get().undo();
+    expect(findClip(get().project, videoClipA)!.speed).toBe(original);
+  });
+
+  it("is a no-op for an unknown clip id", () => {
+    const before = structuredClone(get().project);
+    get().setClipSpeed("does-not-exist", videoTrackId, 4);
+    expect(get().project).toEqual(before);
   });
 });
 

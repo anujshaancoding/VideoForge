@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { selectProjectDurationMs, useEditorStore } from '../../store/editorStore.js';
 import { Button, cx, Modal } from '../ui/index.js';
-import { apiCreateExport, apiPollExportComplete, apiGetDownloadUrl } from '../../lib/api.js';
+import { apiCreateExport, apiPollExportComplete, apiGetDownloadUrl, ApiError } from '../../lib/api.js';
 import { wsClient } from '../../lib/wsClient.js';
 import { clearFirstSession, isFirstSession } from '../../lib/firstSession.js';
 import { trackEvent } from '../../lib/analytics.js';
@@ -11,13 +11,14 @@ import { pruneUnfilledSlots, unfilledMediaSlotCount } from '../../lib/templates.
 // ExportModal (§8.2) — MP4/H.264, ≤1080p Free-tier cap, social presets.
 // Real flow: POST /api/v1/exports → poll until COMPLETE → mint download URL.
 
-type Preset = '9:16' | '16:9' | 'custom';
+type Preset = '9:16' | '16:9' | '1:1' | 'custom';
 type CaptionMode = 'none' | 'burn' | 'sidecar';
-type Phase = 'config' | 'exporting' | 'done' | 'error';
+type Phase = 'config' | 'exporting' | 'done' | 'error' | 'ratelimited';
 
 const PRESETS: Record<Exclude<Preset, 'custom'>, { w: number; h: number; label: string }> = {
   '9:16': { w: 1080, h: 1920, label: 'TikTok / Reels' },
   '16:9': { w: 1920, h: 1080, label: 'YouTube' },
+  '1:1': { w: 1080, h: 1080, label: 'Instagram feed' },
 };
 
 function estimateSizeMb(w: number, h: number, fps: number, durationMs: number): number {
@@ -41,7 +42,13 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
   const hasCaptions = useEditorStore((s) => (s.project.captionTracks[0]?.blocks.length ?? 0) > 0);
 
   const initialPreset: Preset =
-    project.canvas.aspectRatio === '16:9' ? '16:9' : project.canvas.aspectRatio === '9:16' ? '9:16' : 'custom';
+    project.canvas.aspectRatio === '16:9'
+      ? '16:9'
+      : project.canvas.aspectRatio === '9:16'
+        ? '9:16'
+        : project.canvas.aspectRatio === '1:1'
+          ? '1:1'
+          : 'custom';
 
   const [tab, setTab] = useState<'format' | 'captions'>('format');
   const [preset, setPreset] = useState<Preset>(initialPreset);
@@ -123,6 +130,7 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
       const manifest = resolveManifest(project);
       const document = manifest ? pruneUnfilledSlots(project, manifest) : project;
 
+      const effectiveCaptions = hasCaptions ? captions : 'none';
       const rec = await apiCreateExport({
         projectId: project.id,
         settings: {
@@ -131,7 +139,11 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
           resolution: { w: dims.w, h: dims.h },
           fps,
           crf: 18,
-          captions: hasCaptions ? captions : 'none',
+          captions: effectiveCaptions,
+          // Thread the chosen sidecar format so the worker writes the matching file
+          // (.srt or .vtt) next to the MP4. Only meaningful for captions==='sidecar';
+          // harmless extra field otherwise (the graph ignores it).
+          ...(effectiveCaptions === 'sidecar' ? { sidecarFmt } : {}),
           watermark: true,
         },
         document,
@@ -191,11 +203,17 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
     } catch (err) {
       teardownWs();
       if (!abortRef.current) {
+        // 429 = export rate-limit hit. Surface a friendly, non-failure state rather
+        // than the generic red "Export failed" screen (the server allows 5/min).
+        if (err instanceof ApiError && err.status === 429) {
+          setPhase('ratelimited');
+          return;
+        }
         setErrorMsg(err instanceof Error ? err.message : String(err));
         setPhase('error');
       }
     }
-  }, [project, dims, fps, captions, hasCaptions, teardownWs]);
+  }, [project, dims, fps, captions, sidecarFmt, hasCaptions, teardownWs]);
 
   // Fire the TTFE (time-to-first-export) event + clear the first-session flag exactly
   // ONCE, on the first successful export's Download click (the brief's hook point).
@@ -329,6 +347,18 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
         </div>
       )}
 
+      {phase === 'ratelimited' && (
+        // 429 rate-limit: a calm, recoverable info state (NOT the red failure screen).
+        <div data-testid="export-ratelimited" className="flex flex-col items-center gap-3 py-8 text-center">
+          <span aria-hidden="true" className="text-4xl text-vf-info-fg">⏳</span>
+          <p className="text-base font-medium text-vf-text-primary">Hang on a moment</p>
+          <p className="max-w-sm text-sm text-vf-text-secondary">
+            You've hit the limit of 5 exports per minute. Give it a moment and try again — your edit
+            is safe.
+          </p>
+        </div>
+      )}
+
       {phase === 'config' && (
         <>
           {/* First-session watermark disclosure (§6.5): shown ONCE, before a creator's
@@ -390,8 +420,8 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
             <div className="flex flex-col gap-4">
               <fieldset>
                 <legend className="mb-2 text-xs font-medium text-vf-text-secondary">Preset</legend>
-                <div className="grid grid-cols-3 gap-2">
-                  {(['9:16', '16:9', 'custom'] as Preset[]).map((p) => {
+                <div className="grid grid-cols-4 gap-2">
+                  {(['9:16', '16:9', '1:1', 'custom'] as Preset[]).map((p) => {
                     const meta = p === 'custom' ? null : PRESETS[p];
                     return (
                       <button

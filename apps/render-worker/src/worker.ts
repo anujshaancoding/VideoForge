@@ -10,7 +10,7 @@
 
 import { Worker, type Job, type ConnectionOptions } from 'bullmq';
 import { Redis, type RedisOptions } from 'ioredis';
-import { validateProject, type Project } from '@videoforge/project-schema';
+import { validateProject, type Project, type CaptionTrack } from '@videoforge/project-schema';
 import {
   buildExportCommand,
   captionsToSrt,
@@ -190,6 +190,47 @@ export function selectRenderDocument(
   return data.document !== undefined && data.document !== null
     ? data.document
     : data.project;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sidecar captions (.srt / .vtt)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Chosen sidecar caption format ('.srt' | '.vtt'). Defaults to '.srt'. */
+export type SidecarFmt = '.srt' | '.vtt';
+
+/**
+ * Serialise a caption track into a WebVTT document. Derived from the shared SRT
+ * serializer (`captionsToSrt`, the single source of caption ordering/text) so the
+ * two formats can never drift: we reuse its body and only swap the `WEBVTT` header
+ * + the `HH:MM:SS,mmm` → `HH:MM:SS.mmm` timestamp separator VTT requires. Kept here
+ * (not in ffmpeg-graph/project-schema — those are the parity surfaces we must not
+ * touch); pure + exported for unit testing.
+ */
+export function captionsToVtt(track: CaptionTrack): string {
+  // captionsToSrt yields numbered cues `n\nHH:MM:SS,mmm --> HH:MM:SS,mmm\ntext`.
+  // VTT drops the cue numbers' requirement (they're optional) and uses '.' for the
+  // millisecond separator on the timing line only.
+  const body = captionsToSrt(track).replace(
+    /(\d{2}:\d{2}:\d{2}),(\d{3})(\s*-->\s*)(\d{2}:\d{2}:\d{2}),(\d{3})/g,
+    '$1.$2$3$4.$5',
+  );
+  return `WEBVTT\n\n${body}`;
+}
+
+/**
+ * Resolve the sidecar caption format from the raw job settings. The web client puts
+ * the chosen `.srt`/`.vtt` under `settings.sidecarFmt`; anything else (absent, bad)
+ * falls back to `.srt`. Kept tolerant because `sidecarFmt` is NOT part of the typed
+ * `ExportSettings` (the parity surface) — it rides as an extra settings key.
+ */
+export function resolveSidecarFmt(settings: Record<string, unknown> | undefined): SidecarFmt {
+  return settings?.['sidecarFmt'] === '.vtt' ? '.vtt' : '.srt';
+}
+
+/** Serialise the first caption track to the chosen sidecar format. */
+export function buildSidecar(track: CaptionTrack, fmt: SidecarFmt): string {
+  return fmt === '.vtt' ? captionsToVtt(track) : captionsToSrt(track);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -547,10 +588,37 @@ export async function processRenderJob(
     const s3Key = `exports/${exportId}.mp4`;
     await uploadToS3(outputPath, BUCKET_EXPORTS, s3Key);
 
-    // 10. Publish export:complete.
+    // 9b. Sidecar captions: when captions==='sidecar', write the chosen format
+    //     (.srt or .vtt) NEXT TO the MP4 (P0 fix — the format the user picked was
+    //     previously dropped, and SRT was only ever written for the BURN path). The
+    //     format rides as an extra `settings.sidecarFmt` key (not part of the typed
+    //     parity ExportSettings), so we read it from the raw job settings.
+    let sidecarKey: string | null = null;
+    if (settings.captions === 'sidecar' && project.captionTracks.length > 0) {
+      const firstTrack = project.captionTracks[0];
+      if (firstTrack && firstTrack.blocks.length > 0) {
+        const fmt = resolveSidecarFmt(job.data.settings as Record<string, unknown> | undefined);
+        const sidecarLocalPath = join(tmpdir(), `vf-captions-${exportId}${fmt}`);
+        await writeFile(sidecarLocalPath, buildSidecar(firstTrack, fmt));
+        tempFiles.push(sidecarLocalPath);
+        sidecarKey = `exports/${exportId}${fmt}`;
+        await uploadToS3(sidecarLocalPath, BUCKET_EXPORTS, sidecarKey);
+        console.info(
+          `[render-worker] export ${exportId} — wrote sidecar captions → s3://${BUCKET_EXPORTS}/${sidecarKey}`,
+        );
+      }
+    }
+
+    // 10. Publish export:complete (carry the sidecar key when one was written).
     await redis.publish(
       'export:complete',
-      JSON.stringify({ type: 'export:complete', exportId, workspaceId, s3Key }),
+      JSON.stringify({
+        type: 'export:complete',
+        exportId,
+        workspaceId,
+        s3Key,
+        ...(sidecarKey ? { sidecarKey } : {}),
+      }),
     );
 
     console.info(`[render-worker] export ${exportId} complete → s3://${BUCKET_EXPORTS}/${s3Key}`);

@@ -207,6 +207,12 @@ export async function exportRoutes(app: FastifyInstance): Promise<void> {
       ...(body.settings ?? {}),
     };
 
+    // Sidecar caption format ('.srt' | '.vtt') rides as an extra key OUTSIDE the
+    // typed parity ExportSettings (we must not extend ffmpeg-graph's type). Carry it
+    // through to the worker only for the sidecar path; default '.srt'.
+    const rawSettings = (body.settings ?? {}) as Record<string, unknown>;
+    const sidecarFmt = rawSettings['sidecarFmt'] === '.vtt' ? '.vtt' : '.srt';
+
     // Server-side free-tier resolution clamp: short edge ≤ 1080p. Never trust the
     // client's resolution; downscale (keeping aspect ratio) when it exceeds the cap.
     mergedSettings.resolution = clampResolution(mergedSettings.resolution);
@@ -278,7 +284,9 @@ export async function exportRoutes(app: FastifyInstance): Promise<void> {
       projectId,
       workspaceId: request.user.userId,
       project,
-      settings: mergedSettings as unknown as Record<string, unknown>,
+      // Pass the typed settings plus the sidecar format the worker reads for the
+      // sidecar caption path (kept out of the typed ExportSettings shape).
+      settings: { ...mergedSettings, sidecarFmt } as unknown as Record<string, unknown>,
       s3Keys,
     };
     await renderQueue.add('render', jobData);

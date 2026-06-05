@@ -26,7 +26,7 @@ type RatioId = "9:16" | "16:9" | "1:1" | "4:5" | "custom";
 // The chooser is equal-weight with NO pre-selected default (CEO's call). The CEO's
 // pending "9:16-vs-equal" decision is a ONE-LINE flip here: set this to "9:16" (or any
 // RatioId) to pre-select that tile on open; leave `null` for the equal-weight chooser.
-const DEFAULT_RATIO: RatioId | null = null;
+const DEFAULT_RATIO: RatioId | null = "9:16";
 
 interface RatioPreset {
   id: RatioId;

@@ -144,6 +144,13 @@ export interface EditorActions {
   /** Set a constant per-clip opacity (0–100) as a single t=0 keyframe (export reads it). */
   setClipOpacity: (clipId: string, trackId: string, opacity: number) => void;
 
+  /**
+   * Set a clip's playback speed multiplier (0.1×–16×). Writes the schema/graph
+   * `speed` field the export already consumes (setpts/atempo) — preview and export
+   * stay in lockstep (WYCIWYG). Clamped to a sane MVP range; never ≤ 0 (schema: speed > 0).
+   */
+  setClipSpeed: (clipId: string, trackId: string, speed: number) => void;
+
   // ── M4: Per-clip color grade ────────────────────────────────────────────────
   setClipColorGrade: (clipId: string, trackId: string, grade: ColorGrade) => void;
 
@@ -213,6 +220,10 @@ const MIN_PX_PER_SECOND = 10;
 const MAX_PX_PER_SECOND = 800;
 const HISTORY_LIMIT = 200;
 
+/** Per-clip speed multiplier bounds (MVP): 0.1× slow-mo … 16× fast-forward. */
+export const MIN_CLIP_SPEED = 0.1;
+export const MAX_CLIP_SPEED = 16;
+
 // ── Internal helpers (pure, operate on a Project) ──────────────────────────────
 
 const clamp = (n: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, n));
@@ -223,6 +234,31 @@ function isMediaTrack(
   t: Track,
 ): t is Extract<Track, { clips: Clip[] }> {
   return t.type === "video" || t.type === "audio" || t.type === "voiceover";
+}
+
+/**
+ * Find the earliest start (≥ `notBefore`) on a track where a `span`-ms window fits
+ * without overlapping any of `others` (the track's other clips). Used by duplicate so
+ * a copy lands in the first free gap after the original instead of overlapping the
+ * next clip on a packed track. Returns `notBefore` when nothing is in the way.
+ */
+function firstFreeSlotStart(
+  others: ReadonlyArray<{ startOnTimeline: number; endOnTimeline: number }>,
+  span: number,
+  notBefore: number,
+): number {
+  // Consider only clips that could collide at or after `notBefore`, in start order.
+  const sorted = others
+    .filter((c) => c.endOnTimeline > notBefore)
+    .sort((a, b) => a.startOnTimeline - b.startOnTimeline);
+  let candidate = notBefore;
+  for (const c of sorted) {
+    // The window [candidate, candidate+span) overlaps c → jump past c and retry.
+    if (candidate < c.endOnTimeline && c.startOnTimeline < candidate + span) {
+      candidate = c.endOnTimeline;
+    }
+  }
+  return candidate;
 }
 
 /** Find a media clip by id across all media tracks; returns the clip + its track. */
@@ -702,11 +738,15 @@ export const useEditorStore = create<EditorStore>()(
             if (!found) return;
             const { clip, track } = found;
             const span = clip.endOnTimeline - clip.startOnTimeline;
+            // Place the copy in the first free slot AFTER the original rather than at
+            // the original's end — on a packed track that would overlap the next clip.
+            const others = track.clips.filter((c) => c.id !== clip.id);
+            const start = firstFreeSlotStart(others, span, clip.endOnTimeline);
             const copy: Clip = {
               ...clip,
               id: newId,
-              startOnTimeline: clip.endOnTimeline,
-              endOnTimeline: clip.endOnTimeline + span,
+              startOnTimeline: start,
+              endOnTimeline: start + span,
               linkedClipId: null, // a duplicate is not part of the original link group
             };
             const idx = track.clips.findIndex((c) => c.id === clip.id);
@@ -716,11 +756,13 @@ export const useEditorStore = create<EditorStore>()(
             if (!found) return;
             const { clip, track } = found;
             const span = clip.endOnTimeline - clip.startOnTimeline;
+            const others = track.clips.filter((c) => c.id !== clip.id);
+            const start = firstFreeSlotStart(others, span, clip.endOnTimeline);
             const copy = {
               ...clip,
               id: newId,
-              startOnTimeline: clip.endOnTimeline,
-              endOnTimeline: clip.endOnTimeline + span,
+              startOnTimeline: start,
+              endOnTimeline: start + span,
             } as OverlayClip;
             const idx = track.clips.findIndex((c) => c.id === clip.id);
             track.clips.splice(idx + 1, 0, copy);
@@ -860,6 +902,16 @@ export const useEditorStore = create<EditorStore>()(
           if (atZero) atZero.value = v;
           else arr.unshift({ id: uuidv4(), timeMs: 0, value: v, easing: "linear" });
           found.clip.keyframes["opacity"] = arr;
+        });
+      },
+
+      setClipSpeed: (clipId, trackId, speed) => {
+        commit((project) => {
+          const found = findClipInTrack(project, clipId, trackId);
+          if (!found) return;
+          // Clamp to the MVP range; guard against NaN/≤0 (schema requires speed > 0).
+          const v = Number.isFinite(speed) ? speed : 1;
+          found.clip.speed = clamp(v, MIN_CLIP_SPEED, MAX_CLIP_SPEED);
         });
       },
 

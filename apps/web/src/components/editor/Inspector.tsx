@@ -1,10 +1,13 @@
-import { useMemo } from "react";
+import { useMemo, useRef } from "react";
 import {
   selectClip,
   useEditorStore,
+  MIN_CLIP_SPEED,
+  MAX_CLIP_SPEED,
   type ColorGrade,
   type KenBurns,
 } from "../../store/editorStore.js";
+import { parseCaptions } from "../../lib/captions.js";
 import type {
   CaptionBlock,
   Clip,
@@ -167,50 +170,11 @@ function Section({ title, children, action }: { title: string; children: React.R
   );
 }
 
-/** A property row: label · numeric value (read-only display) · keyframe diamond. */
-function PropRow({
-  label,
-  value,
-  unit,
-  keyframable,
-}: {
-  label: string;
-  value: number | string;
-  unit?: string;
-  keyframable?: boolean;
-}) {
-  return (
-    <div className="flex items-center gap-2">
-      <label className="w-24 shrink-0 text-xs text-vf-text-secondary">{label}</label>
-      <div className="flex h-7 flex-1 items-center justify-end rounded-sm border border-vf-border-default bg-vf-surface-2 px-2 text-xs text-vf-text-primary vf-tnum">
-        {value}
-        {unit && <span className="ml-0.5 text-vf-text-tertiary">{unit}</span>}
-      </div>
-      {keyframable && <KeyframeDiamond label={label} />}
-    </div>
-  );
-}
-
-/** Keyframe diamond toggle (visual, §7.B.5). */
-function KeyframeDiamond({ label }: { label: string }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={false}
-      aria-label={`Animate ${label}`}
-      title={`Animate ${label}`}
-      className="flex h-6 w-6 items-center justify-center rounded-sm text-vf-text-tertiary hover:text-vf-accent-text"
-    >
-      <span aria-hidden="true">◇</span>
-    </button>
-  );
-}
-
 // ── Video clip inspector (Properties · Color · Keyframes · Ken Burns) ─────────────
 function VideoClipInspector({ clip }: { clip: Clip }) {
   const setClipColorGrade = useEditorStore((s) => s.setClipColorGrade);
   const setClipOpacity = useEditorStore((s) => s.setClipOpacity);
+  const setClipSpeed = useEditorStore((s) => s.setClipSpeed);
   const addKeyframe = useEditorStore((s) => s.addKeyframe);
   const removeKeyframe = useEditorStore((s) => s.removeKeyframe);
   const setClipKenBurns = useEditorStore((s) => s.setClipKenBurns);
@@ -294,7 +258,34 @@ function VideoClipInspector({ clip }: { clip: Clip }) {
       </Section>
 
       <Section title="Timing">
-        <PropRow label="Speed" value={clip.speed.toFixed(2)} unit="×" />
+        {/* Speed: editable 0.1×–16× (writes clip.speed — the same field the export
+            graph's setpts/atempo consume, so preview and export stay in lockstep). */}
+        <Slider
+          label="Speed"
+          value={clip.speed}
+          min={MIN_CLIP_SPEED}
+          max={MAX_CLIP_SPEED}
+          step={0.05}
+          valueLabel={`${clip.speed.toFixed(2)}×`}
+          onChange={(v) => setClipSpeed(clip.id, clip.trackId, v)}
+        />
+        <div className="flex items-center gap-2">
+          <label className="w-24 shrink-0 text-xs text-vf-text-secondary" htmlFor="clip-speed-input">
+            Exact
+          </label>
+          <input
+            id="clip-speed-input"
+            type="number"
+            min={MIN_CLIP_SPEED}
+            max={MAX_CLIP_SPEED}
+            step={0.05}
+            value={clip.speed}
+            aria-label="Clip speed"
+            onChange={(e) => setClipSpeed(clip.id, clip.trackId, Number(e.target.value))}
+            className="h-7 w-20 rounded-sm border border-vf-border-default bg-vf-surface-2 px-2 text-xs text-vf-text-primary vf-tnum"
+          />
+          <span className="text-2xs text-vf-text-tertiary">×</span>
+        </div>
         <p className="text-2xs text-vf-text-tertiary">ⓘ Audio pitch preserved on export.</p>
       </Section>
 
@@ -620,16 +611,40 @@ function CaptionEditor({ selectedId }: { selectedId: string | null }) {
   const select = useEditorStore((s) => s.select);
   const setPlayhead = useEditorStore((s) => s.setPlayhead);
   const updateCaption = useEditorStore((s) => s.updateCaption);
+  const importCaptions = useEditorStore((s) => s.importCaptions);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const blocks: CaptionBlock[] = captionTracks[0]?.blocks ?? [];
+
+  const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const parsed = parseCaptions(await file.text()) as CaptionBlock[];
+      importCaptions(parsed);
+    } catch {
+      // Silently ignore parse errors for MVP (mirrors MediaPanel's import).
+    }
+  };
 
   return (
     <>
       <div className="flex shrink-0 items-center justify-between border-b border-vf-border-subtle px-4 py-3">
         <h2 className="text-sm font-semibold text-vf-text-primary">Caption editor</h2>
-        <Button variant="secondary" size="sm">
-          Import .srt
+        <Button variant="secondary" size="sm" onClick={() => fileInputRef.current?.click()}>
+          Import .srt / .vtt
         </Button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".srt,.vtt"
+          aria-hidden="true"
+          tabIndex={-1}
+          className="sr-only"
+          onChange={handleImport}
+          data-testid="caption-import-input"
+        />
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
         <table role="grid" className="w-full border-collapse text-2xs">

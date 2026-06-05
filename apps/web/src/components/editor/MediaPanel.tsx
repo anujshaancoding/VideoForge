@@ -6,6 +6,7 @@ import type { Track, CaptionBlock } from '@videoforge/project-schema';
 import { apiPresign, apiUploadToS3, apiConfirmUpload, apiGetAsset, apiPollAssetReady, fileHash, type AssetRecord } from '../../lib/api.js';
 import { wsClient } from '../../lib/wsClient.js';
 import { readViewPrefs, writeViewPrefs } from '../../lib/viewPrefs.js';
+import { parseCaptions } from '../../lib/captions.js';
 
 // MediaPanel — left rail (§7.A). Three-section rail: Media / Text / Captions.
 // "Import media" does the full real S3 upload flow (presign → PUT → confirm →
@@ -46,32 +47,6 @@ function durationLabel(ms: number | null): string {
 function defaultTrackFor(kind: MediaKind, tracks: Track[]): Track | undefined {
   if (kind === 'audio') return tracks.find((t) => t.type === 'audio' || t.type === 'voiceover');
   return tracks.find((t) => t.type === 'video');
-}
-
-// ── SRT parser ────────────────────────────────────────────────────────────────
-
-function parseSrt(text: string): Array<{ id: string; startMs: number; endMs: number; text: string }> {
-  const blocks: Array<{ id: string; startMs: number; endMs: number; text: string }> = [];
-  const srtTimeToMs = (t: string): number => {
-    const [hms, msStr] = t.split(',');
-    const [h, m, s] = (hms ?? '').split(':').map(Number);
-    return ((h ?? 0) * 3600 + (m ?? 0) * 60 + (s ?? 0)) * 1000 + Number(msStr ?? 0);
-  };
-  const parts = text.trim().split(/\n\n+/);
-  for (const part of parts) {
-    const lines = part.trim().split('\n');
-    if (lines.length < 3) continue;
-    const timeLine = lines[1] ?? '';
-    const match = /(\d{2}:\d{2}:\d{2},\d{3})\s+-->\s+(\d{2}:\d{2}:\d{2},\d{3})/.exec(timeLine);
-    if (!match) continue;
-    blocks.push({
-      id: crypto.randomUUID(),
-      startMs: srtTimeToMs(match[1]!),
-      endMs: srtTimeToMs(match[2]!),
-      text: lines.slice(2).join('\n'),
-    });
-  }
-  return blocks;
 }
 
 export default function MediaPanel() {
@@ -159,6 +134,29 @@ export default function MediaPanel() {
     });
     return off;
   }, [updateAsset, registerFromRecord]);
+
+  // WebSocket push: the worker publishes `asset:failed` when server-side processing
+  // (proxy/thumbnail/waveform) fails — the HTTP poll path only catches upload-leg
+  // errors, so without this the card would spin on "Processing…" forever. Flip the
+  // matching card to the error/retry state (the same one upload failures use).
+  useEffect(() => {
+    const off = wsClient.on('asset:failed', (payload) => {
+      const assetId = payload['assetId'];
+      if (typeof assetId !== 'string') return;
+      const message = typeof payload['message'] === 'string' ? payload['message'] : undefined;
+      setAssets((prev) => {
+        const target = prev.find((a) => a.id === assetId);
+        // Ignore events for assets we don't track, or that already settled.
+        if (!target || target.status === 'ready' || target.status === 'error') return prev;
+        return prev.map((a) =>
+          a.id === assetId
+            ? { ...a, status: 'error', errorMsg: message ?? 'Processing failed' }
+            : a,
+        );
+      });
+    });
+    return off;
+  }, []);
 
   const uploadFile = useCallback(
     async (file: File) => {
@@ -263,7 +261,7 @@ export default function MediaPanel() {
     if (!file) return;
     try {
       const text = await file.text();
-      const blocks = parseSrt(text) as CaptionBlock[];
+      const blocks = parseCaptions(text) as CaptionBlock[];
       importCaptions(blocks);
     } catch {
       // Silently ignore parse errors for MVP
