@@ -28,13 +28,9 @@ export default function Transport() {
 
   const frameMs = 1000 / (fps || 30);
 
-  // Sync monitor volume to AudioEngine master gain.
+  // Sync monitor volume to AudioEngine master gain (preview-only; not exported).
   useEffect(() => {
-    const ctx = audioEngine.audioCtx;
-    const master = (audioEngine as unknown as { masterGain?: GainNode }).masterGain;
-    if (master) {
-      master.gain.setTargetAtTime(monitorVol / 100, ctx.currentTime, 0.02);
-    }
+    audioEngine.setMasterVolume(monitorVol);
   }, [monitorVol]);
 
   const skipStart = (): void => {

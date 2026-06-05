@@ -14,6 +14,8 @@ import type {
 } from "@videoforge/project-schema";
 import { msToTimecode } from "@videoforge/project-schema";
 import { Button, cx, Slider } from "../ui/index.js";
+import { resolveManifest } from "../../store/templateStore.js";
+import TemplateSlotPanel from "./TemplateSlotPanel.js";
 
 // Inspector — right context panel (§7.B). Content swaps by selection:
 //   • media video clip → Properties (transform + speed) + Color + Keyframes + Ken Burns
@@ -49,8 +51,24 @@ export default function Inspector() {
     return project.tracks.find((t) => t.id === clip.trackId) ?? null;
   }, [clip, project]);
 
-  // Empty state (§7.B.0): nothing selected.
+  // Template-derived project → resolve its (rewritten) manifest so the slot-fill panel
+  // is available. null for ordinary (non-template) projects.
+  const manifest = resolveManifest(project);
+
+  // Empty state (§7.B.0): nothing selected. For template projects, surface the
+  // guided slot-fill panel here (Templates_Design §2); otherwise the plain prompt.
   if (!selection.id || selection.kind === null) {
+    if (manifest) {
+      return (
+        <aside
+          role="complementary"
+          aria-label="Inspector"
+          className="flex h-full min-h-0 flex-col overflow-y-auto bg-vf-surface-1 p-4"
+        >
+          <TemplateSlotPanel manifest={manifest} />
+        </aside>
+      );
+    }
     return (
       <aside
         role="complementary"
@@ -109,7 +127,7 @@ export default function Inspector() {
           <>
             {header("♪", `audio ${clip.id.slice(0, 6)}`, clipTrack.name)}
             <div className="min-h-0 flex-1 overflow-y-auto p-4">
-              <AudioInspector clip={clip} />
+              <AudioInspector clip={clip} track={clipTrack} />
             </div>
           </>
         ) : (
@@ -192,29 +210,29 @@ function KeyframeDiamond({ label }: { label: string }) {
 // ── Video clip inspector (Properties · Color · Keyframes · Ken Burns) ─────────────
 function VideoClipInspector({ clip }: { clip: Clip }) {
   const setClipColorGrade = useEditorStore((s) => s.setClipColorGrade);
+  const setClipOpacity = useEditorStore((s) => s.setClipOpacity);
   const addKeyframe = useEditorStore((s) => s.addKeyframe);
   const removeKeyframe = useEditorStore((s) => s.removeKeyframe);
   const setClipKenBurns = useEditorStore((s) => s.setClipKenBurns);
   const setPlayhead = useEditorStore((s) => s.setPlayhead);
-  const playheadMs = useEditorStore((s) => s.playheadMs);
+  // Not subscribed — read on demand in handlers so the whole Inspector doesn't
+  // re-render on every playhead tick during playback / scrub.
 
-  // Color grade: prefer M4 extension field, fall back to effects array (legacy).
-  const cgExt = (clip as unknown as { colorGrade?: ColorGrade }).colorGrade;
+  // Color grade: prefer the first-class field, fall back to a legacy effects entry.
   const cgEffect = clip.effects.find((e) => e.type === "colorGrade" && e.enabled)?.params;
   const numFromEffect = (k: string): number =>
     typeof cgEffect?.[k] === "number" ? (cgEffect[k] as number) : 0;
-  const grade: ColorGrade = cgExt ?? {
+  const grade: ColorGrade = clip.colorGrade ?? {
     brightness: numFromEffect("brightness"),
     contrast: numFromEffect("contrast"),
     saturation: numFromEffect("saturation"),
   };
 
-  const kenBurns = (clip as unknown as { kenBurns?: KenBurns }).kenBurns;
+  const kenBurns: KenBurns | null | undefined = clip.kenBurns;
 
-  // Keyframe arrays for opacity and scale (with optional id extension field).
-  type KfWithId = { id?: string; timeMs: number; value: number | string };
-  const opacityKfs = (clip.keyframes["opacity"] ?? []) as KfWithId[];
-  const scaleKfs = (clip.keyframes["scale"] ?? []) as KfWithId[];
+  // Keyframe arrays for opacity and scale.
+  const opacityKfs = clip.keyframes["opacity"] ?? [];
+  const scaleKfs = clip.keyframes["scale"] ?? [];
 
   /** Format milliseconds as M:SS.mmm */
   const fmtMs = (totalMs: number): string => {
@@ -234,7 +252,7 @@ function VideoClipInspector({ clip }: { clip: Clip }) {
   };
 
   const onAddKeyframe = (property: string, value: number) => {
-    addKeyframe(clip.id, clip.trackId, playheadMs, property, value);
+    addKeyframe(clip.id, clip.trackId, useEditorStore.getState().playheadMs, property, value);
   };
 
   const onRemoveKeyframe = (kfId: string) => {
@@ -262,11 +280,17 @@ function VideoClipInspector({ clip }: { clip: Clip }) {
   return (
     <>
       <Section title="Transform">
-        <PropRow label="Position X" value={"50.0"} unit="%" keyframable />
-        <PropRow label="Position Y" value={"50.0"} unit="%" keyframable />
-        <PropRow label="Scale" value={"100.0"} unit="%" keyframable />
-        <PropRow label="Rotation" value={"0.0"} unit="°" keyframable />
-        <PropRow label="Opacity" value={"100"} unit="%" keyframable />
+        <Slider
+          label="Opacity"
+          value={currentOpacity}
+          min={0}
+          max={100}
+          valueLabel={`${currentOpacity}%`}
+          onChange={(v) => setClipOpacity(clip.id, clip.trackId, v)}
+        />
+        <p className="text-2xs text-vf-text-tertiary">
+          ⓘ Pan/zoom is via Ken Burns; scale/opacity animate via Keyframes below.
+        </p>
       </Section>
 
       <Section title="Timing">
@@ -459,65 +483,131 @@ function KeyframeRow({
   );
 }
 
-// ── Audio clip inspector (volume / pan / fades) ──────────────────────────────────
-function AudioInspector({ clip }: { clip: Clip }) {
+// ── Audio clip inspector (volume / pan / fades) — fully wired ─────────────────────
+function AudioInspector({ clip, track }: { clip: Clip; track: Track | null }) {
+  const setClipGain = useEditorStore((s) => s.setClipGain);
+  const setClipFade = useEditorStore((s) => s.setClipFade);
+  const setTrackVolume = useEditorStore((s) => s.setTrackVolume);
+  const setTrackPan = useEditorStore((s) => s.setTrackPan);
+
+  const gain = clip.gain ?? 100;
+  const fadeInS = (clip.fadeInMs ?? 0) / 1000;
+  const fadeOutS = (clip.fadeOutMs ?? 0) / 1000;
+  // Track volume/pan only exist on audio-bearing tracks.
+  const trackVol = track && (track.type === "audio" || track.type === "voiceover") ? track.volume : 100;
+  const trackPan = track && (track.type === "audio" || track.type === "voiceover") ? track.pan : 0;
+  const maxFadeS = Math.max(0, (clip.endOnTimeline - clip.startOnTimeline) / 1000);
+
   return (
     <>
       <Section title="Clip">
-        <PropRow label="Gain" value={(clip.gain ?? 100).toString()} unit="%" />
-        {/* MVP-STUB: fade + envelope writes wired in M4. */}
-        <PropRow label="Fade in" value={"0.00"} unit="s" />
-        <PropRow label="Fade out" value={"0.00"} unit="s" />
-        <div className="flex items-center justify-between">
-          <span className="text-xs text-vf-text-secondary">Volume envelope</span>
-          <KeyframeDiamond label="Volume envelope" />
-        </div>
+        <Slider
+          label="Gain"
+          value={gain}
+          min={0}
+          max={200}
+          valueLabel={`${gain}%`}
+          onChange={(v) => setClipGain(clip.id, clip.trackId, v)}
+        />
+        <Slider
+          label="Fade in"
+          value={Math.round(fadeInS * 10)}
+          min={0}
+          max={Math.max(1, Math.round(maxFadeS * 10))}
+          valueLabel={`${fadeInS.toFixed(1)}s`}
+          onChange={(v) => setClipFade(clip.id, clip.trackId, "in", (v / 10) * 1000)}
+        />
+        <Slider
+          label="Fade out"
+          value={Math.round(fadeOutS * 10)}
+          min={0}
+          max={Math.max(1, Math.round(maxFadeS * 10))}
+          valueLabel={`${fadeOutS.toFixed(1)}s`}
+          onChange={(v) => setClipFade(clip.id, clip.trackId, "out", (v / 10) * 1000)}
+        />
       </Section>
-      <Section title="Track (applies to all clips)">
-        <Slider label="Volume" value={100} min={0} max={200} valueLabel="100%" />
-        <Slider label="Pan" value={0} min={-100} max={100} valueLabel="0" />
-      </Section>
-      <p className="text-2xs text-vf-text-tertiary">ⓘ Master monitor volume is preview-only and does not change your export.</p>
+      {track && (track.type === "audio" || track.type === "voiceover") && (
+        <Section title={`Track · ${track.name} (applies to all its clips)`}>
+          <Slider
+            label="Volume"
+            value={trackVol}
+            min={0}
+            max={200}
+            valueLabel={`${trackVol}%`}
+            onChange={(v) => setTrackVolume(track.id, v)}
+          />
+          <Slider
+            label="Pan"
+            value={trackPan}
+            min={-100}
+            max={100}
+            valueLabel={trackPan === 0 ? "C" : trackPan < 0 ? `${-trackPan}L` : `${trackPan}R`}
+            onChange={(v) => setTrackPan(track.id, v)}
+          />
+        </Section>
+      )}
+      <p className="text-2xs text-vf-text-tertiary">ⓘ Fades + gain/pan render identically in preview and export.</p>
     </>
   );
 }
 
-// ── Text overlay inspector (drawtext-subset, §7.B.4) ─────────────────────────────
+// ── Text overlay inspector (drawtext-subset, §7.B.4) — fully wired ────────────────
 function OverlayInspector({ overlay }: { overlay: OverlayClip }) {
+  const updateOverlay = useEditorStore((s) => s.updateOverlay);
+
   if (overlay.kind !== "text") {
     return (
       <Section title="Properties">
-        <PropRow label="Position X" value={overlay.canvasX.toFixed(1)} unit="%" keyframable />
-        <PropRow label="Position Y" value={overlay.canvasY.toFixed(1)} unit="%" keyframable />
-        <PropRow label="Opacity" value={overlay.opacity} unit="%" keyframable />
+        <Slider label="Position X" value={Math.round(overlay.canvasX)} min={0} max={100} valueLabel={`${overlay.canvasX.toFixed(0)}%`} onChange={(v) => updateOverlay(overlay.id, { canvasX: v })} />
+        <Slider label="Position Y" value={Math.round(overlay.canvasY)} min={0} max={100} valueLabel={`${overlay.canvasY.toFixed(0)}%`} onChange={(v) => updateOverlay(overlay.id, { canvasY: v })} />
+        <Slider label="Opacity" value={Math.round(overlay.opacity)} min={0} max={100} valueLabel={`${overlay.opacity}%`} onChange={(v) => updateOverlay(overlay.id, { opacity: v })} />
       </Section>
     );
   }
   const t = overlay as TextOverlay;
+  const patchStyle = (patch: Partial<TextOverlay["style"]>) =>
+    updateOverlay(t.id, { style: { ...t.style, ...patch } } as Partial<OverlayClip>);
+
   return (
     <>
       <Section title="Text">
-        {/* MVP-STUB: text-content write wired in M4. */}
         <textarea
-          defaultValue={t.text}
+          value={t.text}
+          onChange={(e) => updateOverlay(t.id, { text: e.target.value } as Partial<OverlayClip>)}
           aria-label="Text content"
           className="h-16 w-full resize-none rounded-sm border border-vf-border-default bg-vf-surface-2 p-2 text-sm text-vf-text-primary"
         />
-        <PropRow label="Font" value={t.style.fontFamily} />
-        <PropRow label="Size" value={t.style.fontSize} unit="px" />
+        <div className="flex items-center gap-2">
+          <label className="w-24 shrink-0 text-xs text-vf-text-secondary">Size</label>
+          <input
+            type="number"
+            min={8}
+            max={400}
+            value={t.style.fontSize}
+            onChange={(e) => patchStyle({ fontSize: Math.max(8, Number(e.target.value) || 8) })}
+            aria-label="Font size"
+            className="h-7 w-20 rounded-sm border border-vf-border-default bg-vf-surface-2 px-2 text-xs text-vf-text-primary vf-tnum"
+          />
+          <span className="text-2xs text-vf-text-tertiary">px</span>
+        </div>
         <div className="flex items-center gap-2">
           <label className="w-24 shrink-0 text-xs text-vf-text-secondary">Color</label>
-          <span className="h-5 w-5 rounded-sm border border-vf-border-default" style={{ backgroundColor: t.style.color }} aria-hidden="true" />
+          <input
+            type="color"
+            value={t.style.color}
+            onChange={(e) => patchStyle({ color: e.target.value })}
+            aria-label="Text color"
+            className="h-7 w-10 cursor-pointer rounded-sm border border-vf-border-default bg-vf-surface-2"
+          />
           <span className="text-xs text-vf-text-primary vf-tnum">{t.style.color}</span>
         </div>
-        <PropRow label="Outline" value={t.style.outline ? `${t.style.outline.width}px` : "none"} />
-        <PropRow label="Opacity" value={t.opacity} unit="%" keyframable />
+        <Slider label="Opacity" value={Math.round(t.opacity)} min={0} max={100} valueLabel={`${t.opacity}%`} onChange={(v) => updateOverlay(t.id, { opacity: v })} />
         <p className="text-2xs text-vf-text-tertiary">ⓘ Styles shown here render identically in your export (no server rasterization).</p>
       </Section>
       <Section title="Properties (transform)">
-        <PropRow label="Position X" value={t.canvasX.toFixed(1)} unit="%" keyframable />
-        <PropRow label="Position Y" value={t.canvasY.toFixed(1)} unit="%" keyframable />
-        <PropRow label="Rotation" value={t.rotation.toFixed(1)} unit="°" keyframable />
+        <Slider label="Position X" value={Math.round(t.canvasX)} min={0} max={100} valueLabel={`${t.canvasX.toFixed(0)}%`} onChange={(v) => updateOverlay(t.id, { canvasX: v })} />
+        <Slider label="Position Y" value={Math.round(t.canvasY)} min={0} max={100} valueLabel={`${t.canvasY.toFixed(0)}%`} onChange={(v) => updateOverlay(t.id, { canvasY: v })} />
+        <Slider label="Rotation" value={Math.round(t.rotation)} min={-180} max={180} valueLabel={`${t.rotation.toFixed(0)}°`} onChange={(v) => updateOverlay(t.id, { rotation: v })} />
       </Section>
     </>
   );
@@ -529,6 +619,7 @@ function CaptionEditor({ selectedId }: { selectedId: string | null }) {
   const fps = useEditorStore((s) => s.project.canvas.frameRate);
   const select = useEditorStore((s) => s.select);
   const setPlayhead = useEditorStore((s) => s.setPlayhead);
+  const updateCaption = useEditorStore((s) => s.updateCaption);
 
   const blocks: CaptionBlock[] = captionTracks[0]?.blocks ?? [];
 
@@ -568,10 +659,11 @@ function CaptionEditor({ selectedId }: { selectedId: string | null }) {
                 <td className="px-1 py-1 text-vf-text-secondary vf-tnum">{msToTimecode(b.endMs, fps)}</td>
                 <td className="px-1 py-1">
                   <input
-                    defaultValue={b.text}
+                    value={b.text}
                     aria-label={`Caption ${i + 1} text`}
                     className="w-full rounded-sm border border-transparent bg-transparent px-1 text-vf-text-primary hover:border-vf-border-subtle focus:border-vf-border-default"
                     onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => updateCaption(b.id, { text: e.target.value })}
                   />
                 </td>
               </tr>

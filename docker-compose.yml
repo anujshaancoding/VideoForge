@@ -40,8 +40,10 @@ services:
       retries: 10
 
   # Local-disk S3 double. The ONLY storage backend in dev/CI (MVP_Scope §6).
+  # Image is pinned to a specific release tag — never use :latest in infra that
+  # must match CI. Update both here and in .github/workflows/ci.yml together.
   minio:
-    image: minio/minio:latest
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-minioadmin}
@@ -52,7 +54,7 @@ services:
     volumes:
       - miniodata:/data
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/ready"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -98,9 +100,19 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
-    # Mount the source for hot-reload during dev; the image still owns FFmpeg.
-    volumes:
-      - ./apps/render-worker/src:/app/apps/render-worker/src
+    # CPU/memory guardrails so a stuck or retrying FFmpeg job can NEVER peg the whole
+    # machine again (the host's Docker VM was observed at ~615% CPU from a backlog of
+    # failing render/media jobs spinning FFmpeg). Compose v2 honors these for
+    # `docker compose up`. Bump cpus up if real exports feel slow.
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2g
+    # No source bind-mount: the container runs the built dist (Dockerfile CMD
+    # `node apps/render-worker/dist/index.js`), so mounting src gave zero hot-reload and
+    # only added Docker-Desktop VirtioFS overhead. To pick up worker changes, rebuild:
+    #   docker compose build render-worker
 
 volumes:
   pgdata:

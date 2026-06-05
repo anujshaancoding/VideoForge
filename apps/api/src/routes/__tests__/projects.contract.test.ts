@@ -6,6 +6,11 @@
 // and broke every save. This suite POSTs a project, then PATCHes it with the
 // envelope and asserts the server accepts it (200 + bumped revision), never 422.
 //
+// AUTH: project routes are now gated by the access-JWT preHandler. The suite
+// signs up a throwaway user in beforeAll, captures the returned access token,
+// and sends it as `Authorization: Bearer` on every project request. It also
+// asserts that an UNAUTHENTICATED project request is rejected with 401.
+//
 // buildServer() opens Postgres + Redis connections. When those services are not
 // reachable (e.g. a plain local checkout), we SKIP the whole suite instead of
 // failing — so it runs green in CI Stage 3 (with services) and is a clean no-op
@@ -18,6 +23,13 @@ import type { FastifyInstance } from 'fastify';
 let app: FastifyInstance | null = null;
 let skip = false;
 let skipReason = '';
+/** Bearer access token for the throwaway test user, set in beforeAll. */
+let accessToken = '';
+
+/** Standard auth header for an authenticated project request. */
+function authHeaders(): Record<string, string> {
+  return { authorization: `Bearer ${accessToken}` };
+}
 
 beforeAll(async () => {
   try {
@@ -25,15 +37,30 @@ beforeAll(async () => {
     app = await buildServer();
     await app.ready();
 
-    // /health never touches the DB, so it always 200s. Probe a route that
-    // actually queries Postgres — a non-200 means services are unreachable and
-    // the suite should skip rather than fail.
-    const probe = await app.inject({ method: 'GET', url: '/api/v1/projects' });
-    if (probe.statusCode !== 200) {
+    // An UNAUTHENTICATED project request must now 401 (probe also confirms the
+    // server is up). A 401 here means routing + auth work; any other status that
+    // isn't 200/401 implies services are down → skip.
+    const unauth = await app.inject({ method: 'GET', url: '/api/v1/projects' });
+    if (unauth.statusCode !== 401) {
       throw new Error(
-        `Postgres probe (GET /api/v1/projects) returned ${probe.statusCode}`,
+        `Unauthenticated GET /api/v1/projects returned ${unauth.statusCode} (expected 401)`,
       );
     }
+
+    // Sign up a throwaway user to obtain a real access token. A non-201 means
+    // Postgres is unreachable → skip the suite rather than fail.
+    const signup = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/signup',
+      payload: {
+        email: `contract-${Date.now()}@example.test`,
+        password: 'contract-pass-1234',
+      },
+    });
+    if (signup.statusCode !== 201) {
+      throw new Error(`signup probe returned ${signup.statusCode}`);
+    }
+    accessToken = (signup.json() as { accessToken: string }).accessToken;
   } catch (err) {
     skip = true;
     skipReason = err instanceof Error ? err.message : String(err);
@@ -57,6 +84,20 @@ afterAll(async () => {
 });
 
 describe('PATCH /api/v1/projects/:id autosave envelope contract', () => {
+  it('rejects unauthenticated project requests with 401', async () => {
+    if (skip || !app) return;
+
+    const res = await app.inject({ method: 'GET', url: '/api/v1/projects' });
+    expect(res.statusCode).toBe(401);
+
+    const postRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/projects',
+      payload: { title: 'nope', canvasWidth: 1080, canvasHeight: 1920, frameRate: 30 },
+    });
+    expect(postRes.statusCode).toBe(401);
+  });
+
   it('accepts the { document, baseRevision } envelope and bumps the revision', async () => {
     if (skip || !app) {
       // Guarded skip: services not reachable in this environment.
@@ -67,6 +108,7 @@ describe('PATCH /api/v1/projects/:id autosave envelope contract', () => {
     const createRes = await app.inject({
       method: 'POST',
       url: '/api/v1/projects',
+      headers: authHeaders(),
       payload: {
         title: 'Contract Test Project',
         canvasWidth: 1080,
@@ -85,6 +127,7 @@ describe('PATCH /api/v1/projects/:id autosave envelope contract', () => {
     const patchRes = await app.inject({
       method: 'PATCH',
       url: `/api/v1/projects/${project.id}`,
+      headers: authHeaders(),
       payload: { document: project, baseRevision: project.revision },
     });
 
@@ -97,6 +140,10 @@ describe('PATCH /api/v1/projects/:id autosave envelope contract', () => {
     expect(typeof saved.updatedAt).toBe('string');
 
     // Cleanup so reruns stay idempotent.
-    await app.inject({ method: 'DELETE', url: `/api/v1/projects/${project.id}` });
+    await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/projects/${project.id}`,
+      headers: authHeaders(),
+    });
   });
 });

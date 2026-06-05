@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useEditorStore } from "../../store/editorStore.js";
+import { selectProjectDurationMs, useEditorStore } from "../../store/editorStore.js";
 import { renameProject } from "../../lib/projectStore.js";
 import { Button, IconButton, Tooltip } from "../ui/index.js";
 import ExportModal from "./ExportModal.js";
@@ -18,6 +18,10 @@ export default function TopBar() {
   const redo = useEditorStore((s) => s.redo);
   const canUndo = useEditorStore((s) => s._canUndo);
   const canRedo = useEditorStore((s) => s._canRedo);
+  // Export is gated until the project has timeline content (durationMs > 0). The
+  // grey → amber transition the moment the first clip lands is the first "aha" (§6.4).
+  const durationMs = useEditorStore(selectProjectDurationMs);
+  const canExport = durationMs > 0;
 
   const [exportOpen, setExportOpen] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -102,10 +106,17 @@ export default function TopBar() {
           </Tooltip>
         </div>
 
+        {/* aria-disabled (NOT bare `disabled`) keeps the CTA in the focus order for axe
+            while it's gated — Sentinel checks this. The grey → amber flip when the first
+            clip lands is the first "aha". Title explains the gate to mouse users. */}
         <Button
           variant="primary"
           size="md"
-          onClick={() => setExportOpen(true)}
+          aria-disabled={!canExport}
+          title={canExport ? undefined : "Add a clip to the timeline to export"}
+          onClick={() => {
+            if (canExport) setExportOpen(true);
+          }}
           leadingIcon={<span aria-hidden="true">⤓</span>}
         >
           Export

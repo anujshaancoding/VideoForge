@@ -14,13 +14,17 @@ import { validateProject, type Project } from '@videoforge/project-schema';
 import {
   buildExportCommand,
   captionsToSrt,
+  projectDurationMs,
   type ExportSettings,
   type BuildResult,
 } from '@videoforge/ffmpeg-graph';
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
 import { writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 import {
   downloadFromS3,
   uploadToS3,
@@ -40,6 +44,14 @@ export const RENDER_QUEUE = 'render';
 /** Path to the pinned ffmpeg binary (Pipeline.md §3). */
 const FFMPEG_PATH = process.env['FFMPEG_PATH'] ?? 'ffmpeg';
 
+/**
+ * Directory holding the bundled Inter static TTFs the text-overlay `drawtext` stage
+ * resolves `font:` tokens against (Text_Overlay_Export_Spec.md §4.3). The Dockerfile
+ * downloads the pinned Inter release here and sets this env; the default matches it so
+ * a locally-installed Inter at that path also works.
+ */
+const INTER_FONT_DIR = process.env['INTER_FONT_DIR'] ?? '/usr/share/fonts/inter';
+
 /** Free-tier MVP export defaults (MP4/H.264 ≤1080p, watermark on). */
 const DEFAULT_EXPORT_SETTINGS: ExportSettings = {
   format: 'mp4',
@@ -58,12 +70,29 @@ const DEFAULT_EXPORT_SETTINGS: ExportSettings = {
 /**
  * Render job payload. The API places the full §18 project document inline,
  * alongside export settings, asset S3 key mappings, and workspace/export ids.
+ *
+ * Document SOURCE (Templates wave contract, agreed w/ Core/Pixel): the worker
+ * renders the document the API put on the job — there is no DB fetch here. The
+ * API resolves WHICH §18 document to render (a client-supplied render-snapshot
+ * pruned of unfilled template slots, OR the stored project) and inlines it. To
+ * keep that contract explicit and forward-compatible, the worker accepts the doc
+ * under either field and prefers an explicit `document` snapshot when present,
+ * falling back to `project` (the field the API currently sets — see
+ * apps/api/src/queues.ts `RenderJobData.project`). Either way the SAME doc flows
+ * through buildExportCommand unchanged, so the export-parity invariant holds:
+ * we render EXACTLY the document the API provided.
  */
 export interface RenderJobData {
   exportId: string;
   projectId: string;
   workspaceId: string;
-  /** §18 project JSON (from DB) — validated at job start. */
+  /**
+   * Optional explicit §18 render-snapshot. When the API attaches this (the
+   * previewed, pruned-of-unfilled-slots document), the worker renders THIS exact
+   * document. Takes precedence over `project`.
+   */
+  document?: unknown;
+  /** §18 project JSON the API inlined (snapshot or stored doc) — validated at job start. */
   project: unknown;
   settings?: Partial<ExportSettings>;
   /** S3 keys for each asset referenced in the project. */
@@ -134,19 +163,33 @@ function parseTimeFromFfmpegLine(line: string): number | null {
 }
 
 /**
- * Derive the total project duration in seconds by scanning all clip
- * `endOnTimeline` values across every track.
+ * Total project duration in seconds for the progress bar. Delegates to the graph
+ * package's `projectDurationMs` — the SINGLE source of truth that also bounds the
+ * export (`-t` cap + base `:d=`), so the progress total can never drift from the
+ * actual encoded length. Empty timelines resolve to the documented 1s floor there.
  */
 function projectDurationSeconds(project: Project): number {
-  let maxMs = 0;
-  for (const track of project.tracks) {
-    if ('clips' in track) {
-      for (const clip of (track as { clips: Array<{ endOnTimeline: number }> }).clips) {
-        if (clip.endOnTimeline > maxMs) maxMs = clip.endOnTimeline;
-      }
-    }
-  }
-  return maxMs / 1000 || 1; // avoid division by zero
+  return projectDurationMs(project) / 1000;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Document source selection
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Pick the §18 document the worker renders from the job payload. Prefer an
+ * explicit `document` render-snapshot (the previewed, pruned-of-unfilled-slots
+ * doc the client supplied) when present; otherwise fall back to `project` (the
+ * field the API currently inlines). The worker never fetches by id — the API
+ * resolves WHICH document to render and inlines it. Exported + pure so the
+ * source-selection contract is unit-testable without FFmpeg/Redis/S3.
+ */
+export function selectRenderDocument(
+  data: Pick<RenderJobData, 'document' | 'project'>,
+): unknown {
+  return data.document !== undefined && data.document !== null
+    ? data.document
+    : data.project;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -157,8 +200,12 @@ function projectDurationSeconds(project: Project): number {
  * For every `InputSpec` with kind === "clip", download the asset from S3 and
  * return a map from `assetId` to local temp file path.
  * Falls back from `original` → `proxy` with a warning.
+ *
+ * Exported for the export-parity gate (#8 golden-adjacent test): when BOTH keys
+ * exist we MUST fetch the ORIGINAL (the proxy is a degraded 720p preview rendition,
+ * §16.3 — using it would silently break "what you cut is what you get").
  */
-async function resolveAssets(
+export async function resolveAssets(
   buildResult: BuildResult,
   s3Keys: RenderJobData['s3Keys'],
   exportId: string,
@@ -193,14 +240,43 @@ async function resolveAssets(
 }
 
 /**
- * Rewrite the placeholder tokens in `args` with real local file paths:
- *   `asset:<assetId>`          → local downloaded path
- *   `watermark:vf`             → path to bundled watermark PNG (or a generated one)
- *   `subtitles:captions.srt`   → path to the written SRT file
+ * Replace all occurrences of each sentinel substring in the `-filter_complex` value
+ * with its real path. The text-overlay drawtext stage embeds `__VF_FONT_*__` /
+ * `__VF_OVERLAYTEXT_*__` tokens INSIDE the filter graph string (drawtext reads the
+ * font/text by filter option, not as an `-i` stream), so a whole-arg swap cannot reach
+ * them — we rewrite within the single `-filter_complex` arg instead. The sentinels are
+ * fixed, escape-free strings the builder controls, so a plain substring replace is safe
+ * and deterministic.
  *
- * The `args` array has the form:
- *   ... -i asset:<id> ...
- * so we need to replace the placeholder values wherever they appear.
+ * Pure + exported for unit testing (no fs/spawn).
+ */
+export function substituteFilterTokens(
+  args: string[],
+  replacements: Map<string, string>,
+): string[] {
+  if (replacements.size === 0) return args;
+  return args.map((arg, i) => {
+    // The graph string is the value immediately following the `-filter_complex` flag.
+    if (i === 0 || args[i - 1] !== '-filter_complex') return arg;
+    let out = arg;
+    for (const [token, path] of replacements) {
+      if (out.includes(token)) out = out.split(token).join(path);
+    }
+    return out;
+  });
+}
+
+/**
+ * Rewrite the placeholder tokens in `args` with real local file paths:
+ *   `asset:<assetId>`          → local downloaded path                 (whole-arg `-i` value)
+ *   `watermark:vf`             → path to bundled watermark PNG          (whole-arg `-i` value)
+ *   `subtitles:captions.srt`   → path to the written SRT file           (whole-arg `-i` value)
+ *   `__VF_FONT_<file>__`       → `${INTER_FONT_DIR}/<file>`             (in `-filter_complex`)
+ *   `__VF_OVERLAYTEXT_<id>__`  → path to the written per-overlay text   (in `-filter_complex`)
+ *
+ * Clip/watermark/subtitles tokens appear as standalone args (`-i <token>`); the font /
+ * overlay-text tokens are embedded in the filter graph string (drawtext options), so
+ * they are rewritten there via {@link substituteFilterTokens}.
  */
 function substituteInputPaths(
   args: string[],
@@ -208,6 +284,7 @@ function substituteInputPaths(
   assetPaths: Map<string, string>,
   subtitlePath: string | null,
   watermarkPath: string | null,
+  textFilePaths: Map<string, string>,
 ): string[] {
   // Build a lookup from placeholder token → real path using the InputSpec list.
   const tokenToPath = new Map<string, string>();
@@ -224,7 +301,18 @@ function substituteInputPaths(
     }
   }
 
-  return args.map((arg) => tokenToPath.get(arg) ?? arg);
+  const whole = args.map((arg) => tokenToPath.get(arg) ?? arg);
+
+  // In-filter sentinels: fonts (resolved against INTER_FONT_DIR) + per-overlay text files.
+  const filterReplacements = new Map<string, string>();
+  for (const f of buildResult.fonts) {
+    filterReplacements.set(f.token, join(INTER_FONT_DIR, f.file));
+  }
+  for (const tf of buildResult.textFiles) {
+    const p = textFilePaths.get(tf.token);
+    if (p) filterReplacements.set(tf.token, p);
+  }
+  return substituteFilterTokens(whole, filterReplacements);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -306,23 +394,54 @@ async function spawnFfmpeg(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Return the path to the watermark PNG. In production this would be the
- * bundled branding asset. For MVP we generate a 1x1 transparent PNG so
- * the FFmpeg command doesn't fail when no branding file is present.
+ * Return the path to the watermark PNG. Production sets WATERMARK_PATH to the real
+ * branding asset. Otherwise we GENERATE A VISIBLE one with FFmpeg (the old fallback
+ * was a 1×1 TRANSPARENT PNG → the mandatory Free-tier watermark was invisible).
+ *
+ * Generation chain (each step is dependency-light; falls back on failure):
+ *   1. Branded text "VideoForge" via drawtext on a transparent canvas.
+ *   2. A solid brand-amber tag (no font needed) if drawtext/font is unavailable.
+ *   3. A 1×1 opaque-white pixel (always works) — the export scales it to ~10% width.
  */
 async function resolveWatermarkPath(exportId: string): Promise<string> {
   const bundled = process.env['WATERMARK_PATH'];
   if (bundled) return bundled;
 
-  // Fallback: create a minimal 1×1 transparent PNG so FFmpeg doesn't error out.
-  // Real deployments set WATERMARK_PATH to the actual branding overlay file.
   const path = join(tmpdir(), `vf-wm-${exportId}.png`);
-  // Minimal valid 1×1 transparent PNG (68 bytes).
-  const minimalPng = Buffer.from(
-    '89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c6260000000020001e221bc330000000049454e44ae426082',
+
+  // 1. Try a branded text watermark (white text + shadow on transparent bg).
+  try {
+    await execFileAsync(FFMPEG_PATH, [
+      '-y', '-hide_banner', '-f', 'lavfi',
+      '-i', 'color=c=black@0.0:s=480x110',
+      '-vf',
+      "drawtext=text='VideoForge':fontcolor=white:fontsize=56:x=(w-text_w)/2:y=(h-text_h)/2:shadowcolor=black@0.6:shadowx=3:shadowy=3",
+      '-frames:v', '1', path,
+    ]);
+    return path;
+  } catch {
+    /* drawtext/font unavailable — fall through */
+  }
+
+  // 2. Solid brand-amber tag (no font dependency).
+  try {
+    await execFileAsync(FFMPEG_PATH, [
+      '-y', '-hide_banner', '-f', 'lavfi',
+      '-i', 'color=c=0xFF7A1A:s=240x70', '-frames:v', '1', path,
+    ]);
+    return path;
+  } catch {
+    /* lavfi unavailable — fall through to the embedded pixel */
+  }
+
+  // 3. Last resort: a 1×1 OPAQUE WHITE PNG (visible once scaled), so the watermark
+  //    is never invisible even if FFmpeg generation fails entirely.
+  const whitePixelPng = Buffer.from(
+    '89504e470d0a1a0a0000000d4948445200000001000000010802000000907753' +
+      'de0000000c4944415408d763f8ffff3f0005fe02fea735c1c20000000049454e44ae426082',
     'hex',
   );
-  await writeFile(path, minimalPng);
+  await writeFile(path, whitePixelPng);
   return path;
 }
 
@@ -340,8 +459,15 @@ export async function processRenderJob(
   const tempFiles: string[] = [];
 
   try {
-    // 1. Validate the §18 project document.
-    const validationResult = validateProject(job.data.project);
+    // 1. Resolve the §18 document SOURCE and validate it.
+    //    Prefer an explicit `document` render-snapshot (the previewed, pruned-of-
+    //    unfilled-slots doc) when the API attaches one; otherwise render `project`
+    //    (the field the API currently inlines). We do NOT fetch by id here — the
+    //    API already resolved which document to render and inlined it. This change
+    //    only selects the SOURCE field; the doc still flows unchanged through
+    //    buildExportCommand below, so "render exactly the provided doc" holds.
+    const sourceDoc = selectRenderDocument(job.data);
+    const validationResult = validateProject(sourceDoc);
     if (!validationResult.ok) {
       throw new Error(
         `export ${exportId}: project failed §18 validation (${validationResult.errors.length} issue(s))`,
@@ -379,13 +505,27 @@ export async function processRenderJob(
       tempFiles.push(watermarkPath);
     }
 
-    // 5. Substitute placeholder tokens with real local paths.
+    // 4c. Write one temp file per text overlay (mirrors the SRT write at 4a). The
+    //     drawtext stage reads each overlay's text via `textfile=` — content never
+    //     touches the filtergraph tokeniser, so `:` `'` `%` `\` / newlines are safe
+    //     (§7.1). `overlayId` is a UUID, so the filename is filesystem-safe.
+    const textFilePaths = new Map<string, string>();
+    for (const tf of buildResult.textFiles) {
+      const p = join(tmpdir(), `vf-overlaytext-${exportId}-${tf.overlayId}.txt`);
+      await writeFile(p, tf.text);
+      tempFiles.push(p);
+      textFilePaths.set(tf.token, p);
+    }
+
+    // 5. Substitute placeholder tokens with real local paths (clip/watermark/subtitles
+    //    whole-arg `-i` values + in-filter font/overlay-text sentinels).
     const resolvedArgs = substituteInputPaths(
       buildResult.args,
       buildResult,
       assetPaths,
       subtitlePath,
       watermarkPath,
+      textFilePaths,
     );
 
     // 6. Replace the placeholder output filename "out.mp4" with an absolute temp path.

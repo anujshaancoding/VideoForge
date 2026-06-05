@@ -36,6 +36,10 @@ import {
   type Track,
   type TextOverlay,
   type CaptionBlock,
+  type Keyframe,
+  type ColorGrade,
+  type KenBurns,
+  type ClipTransform,
 } from "@videoforge/project-schema";
 import {
   canRedo as historyCanRedo,
@@ -48,18 +52,10 @@ import {
   type History,
 } from "./history.js";
 
-// ── M4 creative-layer extension types (not yet in §18 schema) ─────────────────
-
-export interface ColorGrade {
-  brightness: number; // UI centred: -100..100
-  contrast: number;   // UI centred: -100..100
-  saturation: number; // UI centred: -100..100
-}
-
-export interface KenBurns {
-  startScale: number; // e.g. 1.0
-  endScale: number;   // e.g. 1.5
-}
+// ── M4 creative-layer types ───────────────────────────────────────────────────
+// ColorGrade / KenBurns are now first-class §18 Clip fields (schema package); we
+// re-export them here so existing importers (Inspector etc.) keep working.
+export type { ColorGrade, KenBurns } from "@videoforge/project-schema";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -97,7 +93,23 @@ export interface EditorActions {
   togglePlay: () => void;
   select: (kind: SelectionKind, id: string | null) => void;
   clearSelection: () => void;
-  addClipFromAsset: (assetId: string, trackId: string, atMs: number) => void;
+  /**
+   * Add a clip referencing `assetId` to `trackId` at `atMs`. `sourceDurationMs` is
+   * the asset's real source length (from the asset registry); when omitted the clip
+   * falls back to a default span. The clip spans the full source (trimIn=0).
+   */
+  addClipFromAsset: (
+    assetId: string,
+    trackId: string,
+    atMs: number,
+    sourceDurationMs?: number,
+  ) => void;
+  /**
+   * Add a clip as an on-canvas picture-in-picture: a new video track on TOP of the
+   * z-order (last video track = topmost) with a centred 50%-size transform. Used by
+   * drag-media-onto-canvas. Returns nothing; selects the new clip.
+   */
+  addClipToCanvas: (assetId: string, atMs: number, sourceDurationMs?: number) => void;
   moveClip: (clipId: string, toTrackId: string, startMs: number) => void;
   trimClip: (clipId: string, edge: "start" | "end", newMs: number) => void;
   splitAtPlayhead: () => void;
@@ -129,19 +141,66 @@ export interface EditorActions {
     value: number,
   ) => void;
 
+  /** Set a constant per-clip opacity (0–100) as a single t=0 keyframe (export reads it). */
+  setClipOpacity: (clipId: string, trackId: string, opacity: number) => void;
+
   // ── M4: Per-clip color grade ────────────────────────────────────────────────
   setClipColorGrade: (clipId: string, trackId: string, grade: ColorGrade) => void;
 
   // ── M4: Ken Burns effect ────────────────────────────────────────────────────
   setClipKenBurns: (clipId: string, trackId: string, kb: KenBurns | null) => void;
 
+  // ── Templates: fill a media slot ──────────────────────────────────────────────
+  /**
+   * Replace a clip's source asset (filling a template media slot). Keeps the clip's
+   * timeline placement, effects, color grade, and Ken Burns intact; only swaps the
+   * asset. When `newSourceDurationMs` is given, re-bases the trims onto the new source
+   * so a shorter asset can't over-trim (trimIn=0, trimOut=min(trimOut, newSourceDur)).
+   * Mirrors the existing setClip* shape; funnels through commit() so it is undoable +
+   * autosaved. (Templates_Architecture §4.4.)
+   */
+  replaceClipAsset: (
+    clipId: string,
+    trackId: string,
+    newAssetId: string,
+    newSourceDurationMs?: number,
+  ) => void;
+
+  // ── On-canvas transform (PiP) ─────────────────────────────────────────────────
+  /** Set (or clear) a clip's on-canvas transform box. Pass undefined to reset to full-frame. */
+  setClipTransform: (clipId: string, trackId: string, transform: ClipTransform | undefined) => void;
+  /** Mirror a clip horizontally/vertically (export hflip/vflip). */
+  setClipFlip: (clipId: string, trackId: string, axis: "h" | "v", value: boolean) => void;
+  /** Re-order a clip's video track in the z-stack (forward = on top). */
+  moveClipLayer: (clipId: string, dir: "forward" | "backward") => void;
+  /** Detach a clip from its A/V link partner so video + audio move/trim independently. */
+  detachAudio: (clipId: string) => void;
+
+  // ── M4: Per-clip gain + fades ─────────────────────────────────────────────────
+  setClipGain: (clipId: string, trackId: string, gain: number) => void;
+  setClipFade: (clipId: string, trackId: string, edge: "in" | "out", ms: number) => void;
+
+  // ── M4: Per-track audio mix ───────────────────────────────────────────────────
+  setTrackVolume: (trackId: string, volume: number) => void;
+  setTrackPan: (trackId: string, pan: number) => void;
+
   // ── M4: Text overlay ────────────────────────────────────────────────────────
   /** Add a text overlay clip to the overlay track `trackId` at `startOnTimeline` ms. */
   addTextOverlay: (text: string, trackId: string, startOnTimeline: number) => void;
+  /** Patch an overlay's editable fields (text, geometry, opacity, style). */
+  updateOverlay: (overlayId: string, patch: Partial<OverlayClip>) => void;
 
-  // ── M4: Caption import ──────────────────────────────────────────────────────
+  // ── M4: Crossfade transitions ─────────────────────────────────────────────────
+  /** Create a crossfade between `clipId` and the next clip on its track. No-op if none. */
+  addCrossfade: (clipId: string, durationMs?: number) => void;
+  /** Remove a transition by id. */
+  removeTransition: (transitionId: string) => void;
+
+  // ── M4: Caption import + edit ─────────────────────────────────────────────────
   /** Replace the first captionTrack's blocks with the given parsed caption blocks. */
   importCaptions: (blocks: CaptionBlock[]) => void;
+  /** Patch a caption block's editable fields (text, start/end). */
+  updateCaption: (blockId: string, patch: Partial<Pick<CaptionBlock, "text" | "startMs" | "endMs">>) => void;
 }
 
 export type EditorStore = EditorState & EditorActions;
@@ -152,8 +211,6 @@ export type EditorStore = EditorState & EditorActions;
 export const DEFAULT_PX_PER_SECOND = 100;
 const MIN_PX_PER_SECOND = 10;
 const MAX_PX_PER_SECOND = 800;
-/** Minimum clip duration so trims/splits can never collapse a clip to zero (ms). */
-const MIN_CLIP_MS = 50;
 const HISTORY_LIMIT = 200;
 
 // ── Internal helpers (pure, operate on a Project) ──────────────────────────────
@@ -258,10 +315,9 @@ function makeTrack(kind: AddTrackKind, indexLabel: number): Track {
 }
 
 /**
- * MVP-STUB: asset durations are not yet resolved from a decoded media probe
- * (real WebCodecs/ffprobe is built later — Spec §10/§15). New clips dropped from
- * the media panel get a default 4s source span. The clip op itself is correct;
- * only the duration source is stubbed.
+ * Fallback clip span (ms) when an asset's real source duration is unknown (e.g. a
+ * clip dropped before ffprobe metadata has arrived). Callers normally pass the real
+ * `sourceDurationMs` from the asset registry, populated by the worker's ffprobe step.
  */
 const DEFAULT_NEW_CLIP_MS = 4000;
 
@@ -341,26 +397,97 @@ export const useEditorStore = create<EditorStore>()(
         }),
 
       // ── Clip operations (undoable) ──
-      addClipFromAsset: (assetId, trackId, atMs) => {
+      addClipFromAsset: (assetId, trackId, atMs, sourceDurationMs) => {
         const clipId = uuidv4();
+        const linkedAudioId = uuidv4();
         commit((project) => {
           const track = project.tracks.find((t) => t.id === trackId);
           if (!track || !isMediaTrack(track)) return;
           const start = ms(atMs);
+          // Use the real source duration when known; otherwise the default span.
+          const span = sourceDurationMs && sourceDurationMs > 0 ? ms(sourceDurationMs) : DEFAULT_NEW_CLIP_MS;
           const clip: Clip = {
             id: clipId,
             sourceAssetId: assetId,
             trackId,
             startOnTimeline: start,
-            endOnTimeline: start + DEFAULT_NEW_CLIP_MS,
+            endOnTimeline: start + span,
             trimIn: 0,
-            trimOut: DEFAULT_NEW_CLIP_MS,
+            trimOut: span,
             speed: 1,
             effects: [],
             keyframes: {},
             linkedClipId: null,
           };
           track.clips.push(clip);
+
+          // Audio Link (§3.2): a video clip carries its embedded audio as a linked
+          // audio clip on an audio track, so the audio is audible AND stays in sync on
+          // move/split. Reuse an existing audio/voiceover track; else create one within
+          // the Free-tier cap (2 audio). Skip if no track is available.
+          if (track.type === "video") {
+            let audioTrack = project.tracks.find(
+              (t): t is Extract<Track, { clips: Clip[] }> => t.type === "audio" || t.type === "voiceover",
+            );
+            if (!audioTrack) {
+              const audioCount = project.tracks.filter((t) => t.type === "audio").length;
+              if (audioCount < 2) {
+                const created = makeTrack("audio", audioCount + 1);
+                project.tracks.push(created);
+                if (isMediaTrack(created)) audioTrack = created;
+              }
+            }
+            if (audioTrack) {
+              const audioClip: Clip = {
+                id: linkedAudioId,
+                sourceAssetId: assetId,
+                trackId: audioTrack.id,
+                startOnTimeline: start,
+                endOnTimeline: start + span,
+                trimIn: 0,
+                trimOut: span,
+                speed: 1,
+                effects: [],
+                keyframes: {},
+                linkedClipId: clipId,
+              };
+              clip.linkedClipId = linkedAudioId;
+              audioTrack.clips.push(audioClip);
+            }
+          }
+        });
+        set((s) => {
+          s.selection = { kind: "clip", id: clipId };
+        });
+      },
+
+      addClipToCanvas: (assetId, atMs, sourceDurationMs) => {
+        const clipId = uuidv4();
+        commit((project) => {
+          const span =
+            sourceDurationMs && sourceDurationMs > 0 ? ms(sourceDurationMs) : DEFAULT_NEW_CLIP_MS;
+          const start = ms(atMs);
+          // New video track PUSHED to the end of the array → topmost in z-order
+          // (video tracks composite bottom-up, last = on top), so the PiP sits above
+          // the base footage. Centred at 50% size.
+          const videoCount = project.tracks.filter((t) => t.type === "video").length;
+          const track = makeTrack("video", videoCount + 1);
+          if (!isMediaTrack(track)) return;
+          project.tracks.push(track);
+          track.clips.push({
+            id: clipId,
+            sourceAssetId: assetId,
+            trackId: track.id,
+            startOnTimeline: start,
+            endOnTimeline: start + span,
+            trimIn: 0,
+            trimOut: span,
+            speed: 1,
+            effects: [],
+            keyframes: {},
+            linkedClipId: null,
+            transform: { x: 25, y: 25, width: 50, height: 50 },
+          });
         });
         set((s) => {
           s.selection = { kind: "clip", id: clipId };
@@ -377,11 +504,12 @@ export const useEditorStore = create<EditorStore>()(
           const { clip, track: from } = found;
           const span = clip.endOnTimeline - clip.startOnTimeline;
           const newStart = ms(startMs);
+          const delta = newStart - clip.startOnTimeline;
+          const linkedId = clip.linkedClipId ?? null;
 
           // Detach from the source track if it's actually moving tracks.
           if (from.id !== dest.id) {
             from.clips = from.clips.filter((c) => c.id !== clipId);
-            // Reuse the same draft object reference where possible.
             const moved: Clip = { ...clip, trackId: dest.id };
             moved.startOnTimeline = newStart;
             moved.endOnTimeline = newStart + span;
@@ -389,6 +517,17 @@ export const useEditorStore = create<EditorStore>()(
           } else {
             clip.startOnTimeline = newStart;
             clip.endOnTimeline = newStart + span;
+          }
+
+          // Audio Link: shift the linked partner by the same delta on its own track.
+          if (linkedId && delta !== 0) {
+            const linked = findClip(project, linkedId);
+            if (linked) {
+              const lspan = linked.clip.endOnTimeline - linked.clip.startOnTimeline;
+              const ns = Math.max(0, linked.clip.startOnTimeline + delta);
+              linked.clip.startOnTimeline = ns;
+              linked.clip.endOnTimeline = ns + lspan;
+            }
           }
         });
       },
@@ -398,24 +537,39 @@ export const useEditorStore = create<EditorStore>()(
           const found = findClip(project, clipId);
           if (!found) return;
           const { clip } = found;
+          // 1-frame minimum (§3.3) derived from the project frame rate, not a fixed ms.
+          const minClip = Math.max(1, Math.round(1000 / (project.canvas.frameRate || 30)));
           const target = ms(newMs);
 
-          if (edge === "start") {
-            // Moving the start edge later trims into the source from its origin:
-            // the head shift adds to trimIn (asset-relative). Cannot pass the end.
-            const maxStart = clip.endOnTimeline - MIN_CLIP_MS;
-            const newStart = clamp(target, 0, Math.max(0, maxStart));
-            const delta = newStart - clip.startOnTimeline; // +later / -earlier
-            clip.startOnTimeline = newStart;
-            // trimIn shifts by the same source amount (scaled by speed), floored ≥ 0.
-            clip.trimIn = Math.max(0, ms(clip.trimIn + delta * clip.speed));
-          } else {
-            // Moving the end edge: clamp to be after the start by MIN_CLIP_MS.
-            const minEnd = clip.startOnTimeline + MIN_CLIP_MS;
-            const newEnd = Math.max(minEnd, target);
-            const delta = newEnd - clip.endOnTimeline;
-            clip.endOnTimeline = newEnd;
-            clip.trimOut = Math.max(clip.trimIn + MIN_CLIP_MS, ms(clip.trimOut + delta * clip.speed));
+          // Apply a trim to one clip; returns the {edge,newPos} delta for linked sync.
+          const applyTrim = (c: Clip): void => {
+            if (edge === "start") {
+              // Moving the start edge trims into the source from its origin: the head
+              // shift adds to trimIn (asset-relative). Cannot reach/cross the end.
+              const maxStart = c.endOnTimeline - minClip;
+              const newStart = clamp(target, 0, Math.max(0, maxStart));
+              const delta = newStart - c.startOnTimeline;
+              c.startOnTimeline = newStart;
+              // trimIn shifts by the source amount (× speed); clamp ≥ 0 and < trimOut.
+              const minSourceSpan = Math.max(1, Math.round(minClip * c.speed));
+              c.trimIn = clamp(ms(c.trimIn + delta * c.speed), 0, c.trimOut - minSourceSpan);
+            } else {
+              // Moving the end edge: clamp to be after the start by one frame.
+              const minEnd = c.startOnTimeline + minClip;
+              const newEnd = Math.max(minEnd, target);
+              const delta = newEnd - c.endOnTimeline;
+              c.endOnTimeline = newEnd;
+              const minSourceSpan = Math.max(1, Math.round(minClip * c.speed));
+              c.trimOut = Math.max(c.trimIn + minSourceSpan, ms(c.trimOut + delta * c.speed));
+            }
+          };
+
+          applyTrim(clip);
+          // Audio Link: trim the linked partner identically so A/V stays aligned.
+          const linkedId = clip.linkedClipId ?? null;
+          if (linkedId) {
+            const linked = findClip(project, linkedId);
+            if (linked) applyTrim(linked.clip);
           }
         });
       },
@@ -659,14 +813,12 @@ export const useEditorStore = create<EditorStore>()(
           if (!found) return;
           const { clip } = found;
           if (!clip.keyframes[property]) clip.keyframes[property] = [];
-          // Keyframes are stored with a generated id embedded in a `id` field
-          // (not in the §18 Keyframe type, so we attach it as an extension).
-          const kf = {
+          const kf: Keyframe = {
             id: uuidv4(),
             timeMs: ms(msVal),
             value,
-            easing: "linear" as const,
-          } as unknown as import("@videoforge/project-schema").Keyframe & { id: string };
+            easing: "linear",
+          };
           // Insert in time order.
           const arr = clip.keyframes[property]!;
           const insertAt = arr.findIndex((k) => k.timeMs > msVal);
@@ -681,9 +833,7 @@ export const useEditorStore = create<EditorStore>()(
           if (!found) return;
           const { clip } = found;
           for (const prop of Object.keys(clip.keyframes)) {
-            clip.keyframes[prop] = clip.keyframes[prop]!.filter(
-              (k) => (k as unknown as { id?: string }).id !== keyframeId,
-            );
+            clip.keyframes[prop] = clip.keyframes[prop]!.filter((k) => k.id !== keyframeId);
           }
         });
       },
@@ -694,11 +844,22 @@ export const useEditorStore = create<EditorStore>()(
           if (!found) return;
           const { clip } = found;
           for (const prop of Object.keys(clip.keyframes)) {
-            const kf = clip.keyframes[prop]!.find(
-              (k) => (k as unknown as { id?: string }).id === keyframeId,
-            );
+            const kf = clip.keyframes[prop]!.find((k) => k.id === keyframeId);
             if (kf) { kf.value = value; return; }
           }
+        });
+      },
+
+      setClipOpacity: (clipId, trackId, opacity) => {
+        commit((project) => {
+          const found = findClipInTrack(project, clipId, trackId);
+          if (!found) return;
+          const v = clamp(Math.round(opacity), 0, 100);
+          const arr = found.clip.keyframes["opacity"] ?? [];
+          const atZero = arr.find((k) => k.timeMs === 0);
+          if (atZero) atZero.value = v;
+          else arr.unshift({ id: uuidv4(), timeMs: 0, value: v, easing: "linear" });
+          found.clip.keyframes["opacity"] = arr;
         });
       },
 
@@ -707,8 +868,7 @@ export const useEditorStore = create<EditorStore>()(
         commit((project) => {
           const found = findClipInTrack(project, clipId, trackId);
           if (!found) return;
-          // Store as a direct extension field using a type cast (MVP).
-          (found.clip as unknown as Record<string, unknown>)["colorGrade"] = grade;
+          found.clip.colorGrade = grade;
         });
       },
 
@@ -717,7 +877,111 @@ export const useEditorStore = create<EditorStore>()(
         commit((project) => {
           const found = findClipInTrack(project, clipId, trackId);
           if (!found) return;
-          (found.clip as unknown as Record<string, unknown>)["kenBurns"] = kb ?? undefined;
+          found.clip.kenBurns = kb;
+        });
+      },
+
+      // ── Templates: fill a media slot (swap the clip's source asset) ─────────
+      replaceClipAsset: (clipId, trackId, newAssetId, newSourceDurationMs) => {
+        commit((project) => {
+          const found = findClipInTrack(project, clipId, trackId);
+          if (!found) return;
+          found.clip.sourceAssetId = newAssetId;
+          // Re-base trims onto the new source so a shorter asset can't over-trim.
+          if (newSourceDurationMs && newSourceDurationMs > 0) {
+            found.clip.trimIn = 0;
+            found.clip.trimOut = Math.min(found.clip.trimOut, ms(newSourceDurationMs));
+          }
+        });
+      },
+
+      setClipTransform: (clipId, trackId, transform) => {
+        commit((project) => {
+          const found = findClipInTrack(project, clipId, trackId);
+          if (!found) return;
+          if (transform) found.clip.transform = transform;
+          else delete found.clip.transform;
+        });
+      },
+
+      setClipFlip: (clipId, trackId, axis, value) => {
+        commit((project) => {
+          const found = findClipInTrack(project, clipId, trackId);
+          if (!found) return;
+          if (axis === "h") found.clip.flipH = value;
+          else found.clip.flipV = value;
+        });
+      },
+
+      moveClipLayer: (clipId, dir) => {
+        commit((project) => {
+          const found = findClip(project, clipId);
+          if (!found || found.track.type !== "video") return;
+          // Array indices of the video tracks (z-order: later index = on top).
+          const videoIdx = project.tracks
+            .map((t, i) => ({ t, i }))
+            .filter((e) => e.t.type === "video")
+            .map((e) => e.i);
+          const pos = videoIdx.findIndex((i) => project.tracks[i]!.id === found.track.id);
+          const targetPos = dir === "forward" ? pos + 1 : pos - 1;
+          if (pos < 0 || targetPos < 0 || targetPos >= videoIdx.length) return;
+          const a = videoIdx[pos]!;
+          const b = videoIdx[targetPos]!;
+          const tmp = project.tracks[a]!;
+          project.tracks[a] = project.tracks[b]!;
+          project.tracks[b] = tmp;
+        });
+      },
+
+      detachAudio: (clipId) => {
+        commit((project) => {
+          const found = findClip(project, clipId);
+          if (!found) return;
+          const partnerId = found.clip.linkedClipId ?? null;
+          found.clip.linkedClipId = null;
+          if (partnerId) {
+            const partner = findClip(project, partnerId);
+            if (partner) partner.clip.linkedClipId = null;
+          }
+        });
+      },
+
+      // ── M4: Per-clip gain + fades ────────────────────────────────────────
+      setClipGain: (clipId, trackId, gain) => {
+        commit((project) => {
+          const found = findClipInTrack(project, clipId, trackId);
+          if (!found) return;
+          found.clip.gain = clamp(Math.round(gain), 0, 200);
+        });
+      },
+
+      setClipFade: (clipId, trackId, edge, msVal) => {
+        commit((project) => {
+          const found = findClipInTrack(project, clipId, trackId);
+          if (!found) return;
+          const span = found.clip.endOnTimeline - found.clip.startOnTimeline;
+          const v = clamp(ms(msVal), 0, span);
+          if (edge === "in") found.clip.fadeInMs = v;
+          else found.clip.fadeOutMs = v;
+        });
+      },
+
+      // ── M4: Per-track audio mix ──────────────────────────────────────────
+      setTrackVolume: (trackId, volume) => {
+        commit((project) => {
+          const track = project.tracks.find((t) => t.id === trackId);
+          if (track && (track.type === "audio" || track.type === "voiceover")) {
+            track.volume = clamp(Math.round(volume), 0, 200);
+          }
+        });
+      },
+
+      setTrackPan: (trackId, pan) => {
+        commit((project) => {
+          const track = project.tracks.find((t) => t.id === trackId);
+          if (track && (track.type === "audio" || track.type === "voiceover")) {
+            track.pan = clamp(Math.round(pan), -100, 100);
+          }
         });
       },
 
@@ -759,12 +1023,77 @@ export const useEditorStore = create<EditorStore>()(
         });
       },
 
-      // ── M4: Caption import ─────────────────────────────────────────────────
+      updateOverlay: (overlayId, patch) => {
+        commit((project) => {
+          const found = findOverlay(project, overlayId);
+          if (!found) return;
+          // Object.assign keeps the discriminated-union `kind` intact (callers never patch it).
+          Object.assign(found.clip, patch);
+        });
+      },
+
+      // ── M4: Crossfade transitions ──────────────────────────────────────────
+      addCrossfade: (clipId, durationMs = 500) => {
+        const transitionId = uuidv4();
+        commit((project) => {
+          const found = findClip(project, clipId);
+          if (!found || found.track.type !== "video") return;
+          // Find the next clip on the same track by timeline order.
+          const ordered = [...found.track.clips].sort(
+            (a, b) => a.startOnTimeline - b.startOnTimeline,
+          );
+          const idx = ordered.findIndex((c) => c.id === clipId);
+          const next = idx >= 0 ? ordered[idx + 1] : undefined;
+          if (!next) return;
+          // Don't duplicate an existing transition for this pair.
+          if (
+            project.transitions.some(
+              (t) => t.fromClipId === clipId && t.toClipId === next.id,
+            )
+          )
+            return;
+          // Clamp duration to the shorter of the two clips' lengths.
+          const fromLen = found.clip.endOnTimeline - found.clip.startOnTimeline;
+          const toLen = next.endOnTimeline - next.startOnTimeline;
+          const dur = clamp(ms(durationMs), 100, Math.max(100, Math.min(fromLen, toLen)));
+          project.transitions.push({
+            id: transitionId,
+            trackId: found.track.id,
+            fromClipId: clipId,
+            toClipId: next.id,
+            type: "crossfade",
+            durationMs: dur,
+            params: {},
+          });
+        });
+      },
+
+      removeTransition: (transitionId) => {
+        commit((project) => {
+          project.transitions = project.transitions.filter((t) => t.id !== transitionId);
+        });
+      },
+
+      // ── M4: Caption import + edit ──────────────────────────────────────────
       importCaptions: (blocks) => {
         commit((project) => {
           const ct = project.captionTracks[0];
           if (!ct) return;
           ct.blocks = blocks as CaptionBlock[];
+        });
+      },
+
+      updateCaption: (blockId, patch) => {
+        commit((project) => {
+          for (const ct of project.captionTracks) {
+            const block = ct.blocks.find((b) => b.id === blockId);
+            if (block) {
+              if (patch.text !== undefined) block.text = patch.text;
+              if (patch.startMs !== undefined) block.startMs = ms(patch.startMs);
+              if (patch.endMs !== undefined) block.endMs = ms(patch.endMs);
+              return;
+            }
+          }
         });
       },
     };

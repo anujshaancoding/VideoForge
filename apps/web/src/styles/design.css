@@ -153,5 +153,15 @@ button:focus:not(:focus-visible) { outline: none; }
 .vf-divider { height: 1px; background: var(--vf-border-subtle); border: none; margin: 0; }
 .vf-vrule { width: 1px; height: 24px; background: var(--vf-border-subtle); }
 
+/* ---- Indeterminate progress (upload/processing cards) ---- */
+.vf-progress-indeterminate {
+  width: 40%;
+  animation: vf-progress-slide 1.1s var(--vf-ease-standard) infinite;
+}
+@keyframes vf-progress-slide {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
+}
+
 [hidden] { display: none !important; }
 .vf-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }

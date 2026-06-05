@@ -55,6 +55,7 @@ const paramBag = z.record(z.union([z.number(), z.string(), z.boolean()]));
 
 export const KeyframeSchema = z
   .object({
+    id: uuid.optional(),
     timeMs: millis,
     value: z.union([z.number(), z.string()]),
     easing: z.enum(["linear", "easeIn", "easeOut", "easeInOut", "hold", "bezier"]),
@@ -63,6 +64,34 @@ export const KeyframeSchema = z
   .strict();
 
 const keyframeMap = z.record(z.array(KeyframeSchema));
+
+/** Per-clip color grade (UI-centred −100..100). First-class clip field per MVP_Scope §5. */
+export const ColorGradeSchema = z
+  .object({
+    brightness: z.number().min(-100).max(100),
+    contrast: z.number().min(-100).max(100),
+    saturation: z.number().min(-100).max(100),
+  })
+  .strict();
+
+/** Ken Burns pan-zoom (scale ramp). */
+export const KenBurnsSchema = z
+  .object({
+    startScale: z.number().gt(0),
+    endScale: z.number().gt(0),
+  })
+  .strict();
+
+/** Per-clip canvas transform (PiP) — percent of canvas. x/y unbounded (off-canvas drag). */
+export const ClipTransformSchema = z
+  .object({
+    x: z.number(),
+    y: z.number(),
+    width: z.number().gt(0),
+    height: z.number().gt(0),
+    rotation: z.number().optional(),
+  })
+  .strict();
 
 export const EffectSchema = z
   .object({
@@ -86,9 +115,16 @@ export const ClipSchema = z
     trimOut: millis,
     speed: z.number().gt(0, "speed must be > 0"),
     gain: z.number().min(0).max(200).optional(),
+    fadeInMs: millis.optional(),
+    fadeOutMs: millis.optional(),
     effects: z.array(EffectSchema),
     keyframes: keyframeMap,
+    colorGrade: ColorGradeSchema.optional(),
+    kenBurns: KenBurnsSchema.nullable().optional(),
     linkedClipId: uuid.nullable().optional(),
+    transform: ClipTransformSchema.optional(),
+    flipH: z.boolean().optional(),
+    flipV: z.boolean().optional(),
   })
   .strict();
 

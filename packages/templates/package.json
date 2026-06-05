@@ -1,0 +1,37 @@
+{
+  "name": "@videoforge/templates",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "VideoForge starter templates — 5 valid Project documents + their sidecar TemplateManifest slot metadata (Templates_Architecture §2-3). Data + pure helpers; never touches the render/ffmpeg-graph path.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./authoring": {
+      "types": "./dist/authoring.d.ts",
+      "import": "./dist/authoring.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@videoforge/project-schema": "workspace:*"
+  },
+  "devDependencies": {
+    "@videoforge/config": "workspace:*",
+    "typescript": "^5.5.4",
+    "vitest": "^2.0.5"
+  }
+}

@@ -187,15 +187,70 @@ export interface Clip {
   /** Per-clip gain (percent, 100 = 0 dB). Combined with track volume on mix. */
   gain?: number;
 
+  /** Per-clip linear audio fade-in duration (ms). Maps to FFmpeg `afade=t=in`. */
+  fadeInMs?: number;
+  /** Per-clip linear audio fade-out duration (ms). Maps to FFmpeg `afade=t=out`. */
+  fadeOutMs?: number;
+
   effects: Effect[];
 
   /** Per-property animation. Key = animatable property path; value = ordered keyframes. */
   keyframes: Record<string, Keyframe[]>;
 
+  /**
+   * One color-grade pass (brightness/contrast/saturation). Per MVP_Scope §5 this is
+   * a first-class clip field (the single MVP effect). Maps to FFmpeg `eq` on export.
+   */
+  colorGrade?: ColorGrade;
+
+  /** Ken Burns pan-zoom (start→end scale). Maps to FFmpeg `zoompan` on export. */
+  kenBurns?: KenBurns | null;
+
   /** A/V link group (e.g. split video+audio that move together). */
   linkedClipId?: UUID | null;
 
+  /**
+   * On-canvas placement (picture-in-picture / manual transform). Percent of the
+   * canvas, like OverlayClip geometry: x/y = top-left, width/height = size. ABSENT
+   * means the clip fills the frame with aspect-fit (the historical default — leaving
+   * it undefined keeps existing projects/exports byte-identical). The preview and the
+   * FFmpeg export BOTH honour this (scale-to-box + overlay-at-position), so a moved /
+   * resized clip looks the same in the export — the fidelity invariant holds.
+   */
+  transform?: ClipTransform;
+
+  /** Mirror the clip horizontally (FFmpeg `hflip`; preview flips on the X axis). */
+  flipH?: boolean;
+  /** Mirror the clip vertically (FFmpeg `vflip`). */
+  flipV?: boolean;
+
   // NOTE: transitions live in Project.transitions[], NOT here (finding E-6).
+}
+
+/**
+ * Per-clip canvas transform (PiP). All values are PERCENT of the canvas (0–100 for
+ * on-canvas; x/y may go slightly out of range while dragging). `rotation` is degrees,
+ * reserved for a later increment (not yet rendered/exported, so always 0 for now).
+ */
+export interface ClipTransform {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotation?: number;
+}
+
+/** Per-clip color grade. UI-centred values: 0 = neutral, range −100..100. */
+export interface ColorGrade {
+  brightness: number;
+  contrast: number;
+  saturation: number;
+}
+
+/** Ken Burns pan-zoom: a slow scale ramp from `startScale` to `endScale` (e.g. 1.0→1.5). */
+export interface KenBurns {
+  startScale: number;
+  endScale: number;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -370,6 +425,8 @@ export interface Effect {
 }
 
 export interface Keyframe {
+  /** Stable id for UI add/remove/update (optional; absent on imported/synthesised kfs). */
+  id?: UUID;
   timeMs: Millis;
   /** Target value at this time (number for numeric props; string for e.g. colour). */
   value: number | string;

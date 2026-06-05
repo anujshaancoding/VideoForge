@@ -3,9 +3,12 @@
 //
 //   POST /api/v1/assets/presign      → dedup by md5Hash; insert row; presign PUT URL
 //   POST /api/v1/assets/:id/confirm  → flip to PROCESSING; enqueue BullMQ media job
-//   GET  /api/v1/assets/:id          → return row; map s3 keys to presigned GET URLs
+//   GET  /api/v1/assets/:id          → return row; map s3 keys to presigned GET URLs;
+//                                       include hasOriginal (has a non-proxy original)
 //
-// workspaceId = 'dev-workspace' (MVP stub — real auth wires the JWT claim).
+// AUTH: every route requires a valid access token (app.authenticate preHandler).
+// workspaceId = the authenticated userId (user-is-the-workspace MVP model); the
+// DB column is still named `workspace_id` but stores the userId.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { randomUUID } from 'node:crypto';
@@ -16,8 +19,6 @@ import { db } from '../db/client.js';
 import { assets } from '../db/schema.js';
 import { presignPut, presignGet, BUCKET_ORIGINALS, BUCKET_PROXIES } from '../s3.js';
 import { mediaQueue, type MediaJobData } from '../queues.js';
-
-const DEV_WORKSPACE = 'dev-workspace';
 
 // ── Body shapes ──────────────────────────────────────────────────────────────
 
@@ -31,6 +32,9 @@ interface PresignBody {
 // ── Route plugin ─────────────────────────────────────────────────────────────
 
 export async function assetRoutes(app: FastifyInstance): Promise<void> {
+  // Gate every route behind a valid access token; request.user.userId is the workspace.
+  app.addHook('preHandler', app.authenticate);
+
   // POST /api/v1/assets/presign — begin upload.
   app.post<{ Body: PresignBody }>('/presign', async (request, reply) => {
     const body = request.body ?? {};
@@ -46,16 +50,19 @@ export async function assetRoutes(app: FastifyInstance): Promise<void> {
         ? body.md5Hash.trim()
         : null;
 
-    // Deduplication: if the same workspace already has a matching md5Hash
-    // return the existing assetId so the client skips the upload.
+    // Deduplication: only dedup against a READY asset (a complete, processed copy).
+    // Matching a half-finished AWAITING_UPLOAD/PROCESSING/FAILED row would hand the
+    // client a broken asset it then polls forever — so those fall through to a fresh
+    // upload (md5_hash has no unique constraint, so a new row is fine).
     if (md5Hash) {
       const [dup] = await db
-        .select({ id: assets.id, status: assets.status })
+        .select({ id: assets.id })
         .from(assets)
         .where(
           and(
-            eq(assets.workspaceId, DEV_WORKSPACE),
+            eq(assets.workspaceId, request.user.userId),
             eq(assets.md5Hash, md5Hash),
+            eq(assets.status, 'READY'),
           ),
         );
       if (dup) {
@@ -69,7 +76,7 @@ export async function assetRoutes(app: FastifyInstance): Promise<void> {
 
     await db.insert(assets).values({
       id: assetId,
-      workspaceId: DEV_WORKSPACE,
+      workspaceId: request.user.userId,
       filename,
       contentType,
       fileSize: Number.isFinite(fileSize) && fileSize > 0 ? fileSize : 0,
@@ -99,7 +106,7 @@ export async function assetRoutes(app: FastifyInstance): Promise<void> {
         .where(
           and(
             eq(assets.id, request.params.id),
-            eq(assets.workspaceId, DEV_WORKSPACE),
+            eq(assets.workspaceId, request.user.userId),
           ),
         );
 
@@ -134,7 +141,7 @@ export async function assetRoutes(app: FastifyInstance): Promise<void> {
       .where(
         and(
           eq(assets.id, request.params.id),
-          eq(assets.workspaceId, DEV_WORKSPACE),
+          eq(assets.workspaceId, request.user.userId),
         ),
       );
 
@@ -166,6 +173,10 @@ export async function assetRoutes(app: FastifyInstance): Promise<void> {
       durationMs: row.durationMs,
       width: row.width,
       height: row.height,
+      // True when the asset still has its full-quality ORIGINAL (non-proxy) S3
+      // object. Pixel uses this for the pre-export proxy-warning badge: a missing
+      // original means the export would render from the lower-quality proxy.
+      hasOriginal: Boolean(row.s3KeyOriginal),
       proxyUrl,
       thumbnailUrl,
       waveformUrl,

@@ -1,0 +1,16 @@
+{
+  "extends": "@videoforge/config/tsconfig.base.json",
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "composite": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true
+  },
+  "references": [{ "path": "../project-schema" }],
+  "include": ["src/**/*.ts"],
+  "exclude": ["dist", "node_modules", "src/**/__tests__/**"]
+}

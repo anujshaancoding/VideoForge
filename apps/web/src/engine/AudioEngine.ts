@@ -2,33 +2,43 @@
 // AudioEngine — Web Audio graph for VideoForge timeline preview (§5.1, §7).
 //
 // One AudioContext lives for the entire session (never recreated on play/pause).
-// Each audio/voiceover track gets its own gain + stereo-panner node chain.
-// AudioContext.currentTime is the master clock: the PreviewEngine reads it to
-// keep video frames in sync.
+// AudioContext.currentTime is the MASTER CLOCK; the PreviewEngine reads it so video
+// frames chase audio and A/V never drifts.
 //
-// Stub-URL detection: any proxyUrl containing 'stub.local' is skipped silently
-// (no decode attempted). Real proxy URLs follow the http://localhost:9000/…
-// pattern used by the local MinIO/S3 proxy.
+// Mix model mirrors the FFmpeg export (packages/ffmpeg-graph) so preview==export:
+//   • Only audio + voiceover tracks contribute (video-track audio is not mixed —
+//     embedded audio is carried by a LINKED audio clip on an audio track).
+//   • Each CLIP is scheduled at its timeline position with its trim offset + speed
+//     (the old engine played only each track's FIRST clip, from t=0, ignoring trims
+//     and timeline position — so preview audio never matched the export).
+//   • Per-clip gain + leading fade-in (from `keyframes.gain`); per-track volume/pan;
+//     mute/solo gating recomputed live whenever the project changes.
+//
+// Source URLs are resolved per asset from the asset registry (store/assetStore) —
+// never synthesised.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import type { Project } from "@videoforge/project-schema";
+import type { Project, Clip, Track } from "@videoforge/project-schema";
+import { getAssetMeta } from "../store/assetStore.js";
+import { computeAudibleTrackIds, computeClipPlayback, isAudioTrack } from "./audioMix.js";
 
-interface TrackNodes {
-  source: AudioBufferSourceNode | null;
-  gain: GainNode;
+interface TrackChain {
+  gain: GainNode;   // track volume × mute/solo gate
   pan: StereoPannerNode;
-  buffer: AudioBuffer | null;
-  proxyUrl: string;
 }
-
-const isStubUrl = (url: string): boolean =>
-  !url || url.includes("stub.local") || url.startsWith("blob:stub");
 
 export class AudioEngine {
   private ctx: AudioContext;
-  private trackNodes: Map<string, TrackNodes> = new Map();
   private masterGain: GainNode;
+  private trackChains: Map<string, TrackChain> = new Map();
+  /** Decoded buffers pooled per assetId. */
+  private buffers: Map<string, AudioBuffer> = new Map();
+  /** assetId currently being fetched/decoded (dedupe concurrent loads). */
+  private loading: Set<string> = new Set();
+  /** Live scheduled sources, so pause() can stop them all. */
+  private activeSources: AudioBufferSourceNode[] = [];
   private _isPlaying = false;
+  private project: Project | null = null;
 
   constructor() {
     this.ctx = new AudioContext();
@@ -46,162 +56,180 @@ export class AudioEngine {
     return this._isPlaying;
   }
 
-  /**
-   * Load (or reload) a single audio track's buffer from its proxy URL.
-   * Stub URLs are silently ignored. Calling this while playing is a no-op for
-   * the active source; restart playback to hear the new buffer.
-   */
-  async loadTrack(
-    trackId: string,
-    proxyUrl: string,
-    volume: number,
-    pan: number,
-    muted: boolean,
-  ): Promise<void> {
-    // Reuse existing nodes if the URL hasn't changed.
-    const existing = this.trackNodes.get(trackId);
-    if (existing && existing.proxyUrl === proxyUrl && existing.buffer) return;
+  /** Master monitor gain (preview-only; does NOT affect export). */
+  setMasterVolume(volume: number): void {
+    this.masterGain.gain.setTargetAtTime(Math.max(0, volume / 100), this.ctx.currentTime, 0.02);
+  }
 
-    // Tear down old nodes gracefully.
-    if (existing) {
-      existing.source?.stop();
-      existing.gain.disconnect();
-      existing.pan.disconnect();
+  private isAudioTrack(t: Track): t is Extract<Track, { type: "audio" | "voiceover" }> {
+    return isAudioTrack(t);
+  }
+
+  /** Which audio/voiceover tracks are audible per mute/solo (mirrors export). */
+  private audibleTrackIds(project: Project): Set<string> {
+    return computeAudibleTrackIds(project);
+  }
+
+  private ensureChain(trackId: string): TrackChain {
+    let chain = this.trackChains.get(trackId);
+    if (!chain) {
+      const gain = this.ctx.createGain();
+      const pan = this.ctx.createStereoPanner();
+      gain.connect(pan);
+      pan.connect(this.masterGain);
+      chain = { gain, pan };
+      this.trackChains.set(trackId, chain);
     }
+    return chain;
+  }
 
-    const gainNode = this.ctx.createGain();
-    gainNode.gain.value = muted ? 0 : volume / 100;
-
-    const panNode = this.ctx.createStereoPanner();
-    panNode.pan.value = pan / 100; // spec: -100…+100 → -1…+1
-
-    gainNode.connect(panNode);
-    panNode.connect(this.masterGain);
-
-    const nodes: TrackNodes = {
-      source: null,
-      gain: gainNode,
-      pan: panNode,
-      buffer: null,
-      proxyUrl,
-    };
-    this.trackNodes.set(trackId, nodes);
-
-    if (isStubUrl(proxyUrl)) return;
-
+  /** Decode (once) the audio buffer for an asset from its presigned proxy URL. */
+  private async ensureBuffer(assetId: string): Promise<void> {
+    if (this.buffers.has(assetId) || this.loading.has(assetId)) return;
+    const url = getAssetMeta(assetId)?.proxyUrl;
+    if (!url) return;
+    this.loading.add(assetId);
     try {
-      const res = await fetch(proxyUrl);
+      const res = await fetch(url);
       if (!res.ok) return;
       const arrayBuffer = await res.arrayBuffer();
-      nodes.buffer = await this.ctx.decodeAudioData(arrayBuffer);
+      const buf = await this.ctx.decodeAudioData(arrayBuffer);
+      this.buffers.set(assetId, buf);
+      // If we're mid-playback, schedule any clips of this asset that are still ahead.
+      if (this._isPlaying && this.project) this._scheduleNewlyLoaded(assetId);
     } catch {
-      // Network / decode failures are non-fatal in preview.
+      // Network/decode failure is non-fatal in preview.
+    } finally {
+      this.loading.delete(assetId);
     }
   }
 
   /**
-   * Schedule all loaded audio tracks to play from `fromMs`.
-   * Uses ctx.currentTime math so A/V stays in sync.
+   * Sync against the full project: ensure a chain per audio/voiceover track, apply
+   * track volume/pan + mute/solo gating live, and kick off buffer decodes. Called
+   * whenever the project changes (incl. mute/solo toggles).
    */
-  playAll(fromMs: number): void {
-    this._isPlaying = true;
+  updateProject(project: Project): void {
+    this.project = project;
+    const audible = this.audibleTrackIds(project);
+    const now = this.ctx.currentTime;
 
-    const offsetSec = fromMs / 1000;
-
-    for (const [, nodes] of this.trackNodes) {
-      if (!nodes.buffer) continue;
-      this._startSource(nodes, offsetSec);
+    for (const track of project.tracks) {
+      if (!this.isAudioTrack(track)) continue;
+      const chain = this.ensureChain(track.id);
+      const targetGain = audible.has(track.id) ? track.volume / 100 : 0;
+      chain.gain.gain.setTargetAtTime(targetGain, now, 0.02);
+      chain.pan.pan.setTargetAtTime(track.pan / 100, now, 0.02);
+      for (const clip of track.clips) void this.ensureBuffer(clip.sourceAssetId);
     }
 
-    // Resume context if it was suspended (browser autoplay policy).
-    if (this.ctx.state === "suspended") {
-      void this.ctx.resume();
+    // Drop chains for tracks that no longer exist.
+    for (const id of [...this.trackChains.keys()]) {
+      if (!project.tracks.some((t) => t.id === id && this.isAudioTrack(t))) {
+        const chain = this.trackChains.get(id);
+        chain?.gain.disconnect();
+        chain?.pan.disconnect();
+        this.trackChains.delete(id);
+      }
     }
   }
 
-  private _startSource(nodes: TrackNodes, offsetSec: number): void {
-    // Stop any previously running source for this track.
-    try {
-      nodes.source?.stop();
-    } catch {
-      // already stopped
+  /** Schedule every audible clip at its correct timeline position from `fromMs`. */
+  playAll(fromMs: number): void {
+    this._isPlaying = true;
+    this.playFromMs = fromMs;
+    this.playStartCtxTime = this.ctx.currentTime;
+    this._stopAllSources();
+    if (this.ctx.state === "suspended") void this.ctx.resume();
+    if (!this.project) return;
+
+    const audible = this.audibleTrackIds(this.project);
+    for (const track of this.project.tracks) {
+      if (!this.isAudioTrack(track) || !audible.has(track.id)) continue;
+      for (const clip of track.clips) this._scheduleClip(track.id, clip, fromMs);
     }
-    nodes.source = null;
+  }
 
-    if (!nodes.buffer) return;
-    const duration = nodes.buffer.duration;
-    if (offsetSec >= duration) return; // nothing left to play
+  private playFromMs = 0;
+  private playStartCtxTime = 0;
 
+  /** Schedule a single clip relative to the master clock. */
+  private _scheduleClip(trackId: string, clip: Clip, fromMs: number): void {
+    const buffer = this.buffers.get(clip.sourceAssetId);
+    if (!buffer) return; // not decoded yet — picked up by _scheduleNewlyLoaded
+
+    // Where in the asset buffer (seconds) and when (ctx time) to start.
+    const sched = computeClipPlayback(
+      clip,
+      fromMs,
+      this.playStartCtxTime,
+      this.ctx.currentTime,
+    );
+    if (!sched) return;
+    const { bufferOffsetSec, whenSec, playDurSec, speed } = sched;
+    if (bufferOffsetSec >= buffer.duration) return;
+
+    const chain = this.ensureChain(trackId);
     const src = this.ctx.createBufferSource();
-    src.buffer = nodes.buffer;
-    src.connect(nodes.gain);
-    // Play the asset from `offsetSec` within its buffer, starting immediately.
-    src.start(this.ctx.currentTime, Math.max(0, offsetSec));
-    nodes.source = src;
+    src.buffer = buffer;
+    src.playbackRate.value = speed; // preview = pitch-shifted; export uses atempo
+
+    // Per-clip gain + linear fade in/out (mirrors export afade in/out from clip fields).
+    const clipGain = this.ctx.createGain();
+    const baseGain = (clip.gain ?? 100) / 100;
+    const startAt = Math.max(this.ctx.currentTime, whenSec);
+    const wallDur = playDurSec / speed; // audible wall-clock seconds
+    const endCtx = startAt + wallDur;
+    const fadeInSec = (clip.fadeInMs ?? 0) / 1000;
+    const fadeOutSec = (clip.fadeOutMs ?? 0) / 1000;
+
+    clipGain.gain.cancelScheduledValues(startAt);
+    if (fadeInSec > 0 && fromMs <= clip.startOnTimeline) {
+      clipGain.gain.setValueAtTime(0, startAt);
+      clipGain.gain.linearRampToValueAtTime(baseGain, startAt + Math.min(fadeInSec, wallDur));
+    } else {
+      clipGain.gain.setValueAtTime(baseGain, startAt);
+    }
+    if (fadeOutSec > 0) {
+      const foStart = Math.max(startAt, endCtx - fadeOutSec);
+      clipGain.gain.setValueAtTime(baseGain, foStart);
+      clipGain.gain.linearRampToValueAtTime(0, endCtx);
+    }
+
+    src.connect(clipGain);
+    clipGain.connect(chain.gain);
+    src.start(startAt, Math.max(0, bufferOffsetSec), playDurSec);
+    this.activeSources.push(src);
+  }
+
+  /** When a buffer finishes decoding mid-playback, schedule its still-future clips. */
+  private _scheduleNewlyLoaded(assetId: string): void {
+    if (!this.project) return;
+    const nowMs = this.playFromMs + (this.ctx.currentTime - this.playStartCtxTime) * 1000;
+    const audible = this.audibleTrackIds(this.project);
+    for (const track of this.project.tracks) {
+      if (!this.isAudioTrack(track) || !audible.has(track.id)) continue;
+      for (const clip of track.clips) {
+        if (clip.sourceAssetId === assetId && clip.endOnTimeline > nowMs) {
+          this._scheduleClip(track.id, clip, nowMs);
+        }
+      }
+    }
+  }
+
+  private _stopAllSources(): void {
+    for (const src of this.activeSources) {
+      try { src.stop(); } catch { /* already stopped */ }
+    }
+    this.activeSources = [];
   }
 
   /** Stop all audio sources immediately. Does NOT suspend the AudioContext. */
   pauseAll(): void {
     this._isPlaying = false;
-    for (const [, nodes] of this.trackNodes) {
-      try {
-        nodes.source?.stop();
-      } catch {
-        // already stopped
-      }
-      nodes.source = null;
-    }
+    this._stopAllSources();
   }
 
-  setTrackMute(trackId: string, muted: boolean): void {
-    const nodes = this.trackNodes.get(trackId);
-    if (!nodes) return;
-    // Ramp to zero/one over 20ms to avoid clicks.
-    nodes.gain.gain.setTargetAtTime(muted ? 0 : 1, this.ctx.currentTime, 0.02);
-  }
-
-  setTrackVolume(trackId: string, volume: number): void {
-    const nodes = this.trackNodes.get(trackId);
-    if (!nodes) return;
-    nodes.gain.gain.setTargetAtTime(volume / 100, this.ctx.currentTime, 0.02);
-  }
-
-  setTrackPan(trackId: string, pan: number): void {
-    const nodes = this.trackNodes.get(trackId);
-    if (!nodes) return;
-    nodes.pan.pan.value = pan / 100;
-  }
-
-  /**
-   * Solo mode: if `soloActive` is true, mute every track EXCEPT the soloed one;
-   * otherwise restore all tracks to their stored mute state.
-   */
-  setTrackSolo(trackId: string, soloActive: boolean, allTrackIds: string[]): void {
-    for (const id of allTrackIds) {
-      const nodes = this.trackNodes.get(id);
-      if (!nodes) continue;
-      const targetVol = soloActive && id !== trackId ? 0 : 1;
-      nodes.gain.gain.setTargetAtTime(targetVol, this.ctx.currentTime, 0.02);
-    }
-  }
-
-  /**
-   * Sync audio nodes against the full project: load any new audio/voiceover tracks,
-   * and update gain/pan for existing ones. Called whenever the project changes.
-   */
-  updateProject(project: Project): void {
-    for (const track of project.tracks) {
-      if (track.type !== "audio" && track.type !== "voiceover") continue;
-      // Use the first clip's source as a representative proxy URL (MVP).
-      const firstClip = track.clips[0];
-      if (!firstClip) continue;
-      // Build a deterministic proxy URL (real backend uses localhost:9000).
-      const proxyUrl = `http://localhost:9000/proxy/${firstClip.sourceAssetId}.m4a`;
-      void this.loadTrack(track.id, proxyUrl, track.volume, track.pan, track.muted);
-    }
-  }
-
-  /** Tear down the context on component unmount. */
   destroy(): void {
     this.pauseAll();
     void this.ctx.close();

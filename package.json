@@ -17,13 +17,14 @@
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
-    "lint": "pnpm -r lint",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
     "check:ffmpeg": "node scripts/check-ffmpeg.mjs",
     "services:up": "docker compose up -d --wait",
     "services:down": "docker compose down",
     "services:reset": "docker compose down -v",
     "test:golden": "pnpm --filter @videoforge/ffmpeg-graph test:golden",
-    "test:perf": "tsx scripts/perf-gate.ts",
+    "test:perf": "./node_modules/.bin/playwright test --project=perf",
     "generate:fixtures": "tsx scripts/generate-fixtures.ts",
     "seed": "pnpm seed:storage && pnpm seed:db",
     "seed:storage": "tsx infra/minio/seed.ts",
@@ -34,6 +35,17 @@
     "test:e2e:headed": "./node_modules/.bin/playwright test --headed"
   },
   "devDependencies": {
-    "@playwright/test": "^1.60.0"
+    "@aws-sdk/client-s3": "^3.600.0",
+    "@axe-core/playwright": "^4.11.3",
+    "@eslint/js": "^9.13.0",
+    "@playwright/test": "^1.60.0",
+    "axe-core": "^4.12.0",
+    "eslint": "^9.13.0",
+    "eslint-plugin-jsx-a11y": "^6.10.1",
+    "eslint-plugin-react-hooks": "^5.0.0",
+    "globals": "^15.11.0",
+    "postgres": "^3.4.4",
+    "tsx": "^4.16.0",
+    "typescript-eslint": "^8.10.0"
   }
 }

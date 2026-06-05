@@ -5,7 +5,10 @@
 //   GET  /api/v1/exports/:id    → poll status; include presigned outputUrl when COMPLETE
 //   POST /api/v1/exports/:id/download → mint a fresh 1-hour presigned GET URL
 //
-// workspaceId = 'dev-workspace' (MVP stub — real auth wires the JWT claim).
+// AUTH: every route requires a valid access token (app.authenticate preHandler).
+// workspaceId = the authenticated userId (user-is-the-workspace MVP model). The
+// per-user export rate-limit also keys off this userId. DB column stays
+// `workspace_id`.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { randomUUID } from 'node:crypto';
@@ -17,8 +20,6 @@ import { db } from '../db/client.js';
 import { projects, exportJobs, assets } from '../db/schema.js';
 import { presignGet, BUCKET_EXPORTS } from '../s3.js';
 import { renderQueue, type RenderJobData, redisClient } from '../queues.js';
-
-const DEV_WORKSPACE = 'dev-workspace';
 
 /** Collect every distinct sourceAssetId referenced by clips/overlays in a project. */
 function collectAssetIds(project: Project): string[] {
@@ -69,11 +70,54 @@ const DEFAULT_EXPORT_SETTINGS: ExportSettings = {
 interface CreateExportBody {
   projectId?: unknown;
   settings?: Partial<ExportSettings>;
+  /**
+   * Optional full §18 render-snapshot (Templates wave contract). When present,
+   * the worker renders THIS exact document (e.g. a template pruned of unfilled
+   * slots) instead of the stored project — preserving preview==export. It does
+   * NOT change ownership/billing: the export still belongs to `projectId`, which
+   * must be owned by the caller, and the Free-tier watermark/rate-limit are
+   * applied exactly as for the stored-project path.
+   */
+  document?: unknown;
 }
+
+// ── Atomic sliding-window rate limit (Redis Lua) ─────────────────────────────
+//
+// The previous implementation ran zremrangebyscore → zcard → zadd as three
+// separate round-trips, a TOCTOU race: N concurrent requests could all read a
+// sub-limit count before any of them added, and all pass. This Lua script does
+// prune + count + conditional-add in ONE atomic server-side step.
+//
+//   KEYS[1] = rate key            ARGV[1] = now (ms epoch)
+//   ARGV[2] = windowMs            ARGV[3] = limit
+//   ARGV[4] = unique member       ARGV[5] = key ttl (seconds)
+//
+// Returns 1 when the request is ALLOWED (member added), 0 when DENIED (over the
+// limit; nothing added). Because the add is conditional and atomic, only the
+// first `limit` requests in any window can win.
+const RATE_LIMIT_LUA = `
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local windowMs = tonumber(ARGV[2])
+local limit = tonumber(ARGV[3])
+local member = ARGV[4]
+local ttl = tonumber(ARGV[5])
+redis.call('ZREMRANGEBYSCORE', key, '-inf', now - windowMs)
+local count = redis.call('ZCARD', key)
+if count >= limit then
+  return 0
+end
+redis.call('ZADD', key, now, member)
+redis.call('EXPIRE', key, ttl)
+return 1
+`;
 
 // ── Route plugin ─────────────────────────────────────────────────────────────
 
 export async function exportRoutes(app: FastifyInstance): Promise<void> {
+  // Gate every route behind a valid access token; request.user.userId is the workspace.
+  app.addHook('preHandler', app.authenticate);
+
   // POST /api/v1/exports — create export job.
   app.post<{ Body: CreateExportBody }>('/', async (request, reply) => {
     const body = request.body ?? {};
@@ -93,7 +137,7 @@ export async function exportRoutes(app: FastifyInstance): Promise<void> {
       .where(
         and(
           eq(projects.id, projectId),
-          eq(projects.workspaceId, DEV_WORKSPACE),
+          eq(projects.workspaceId, request.user.userId),
         ),
       );
 
@@ -103,29 +147,59 @@ export async function exportRoutes(app: FastifyInstance): Promise<void> {
         .send({ error: 'NotFound', message: 'project not found' });
     }
 
-    // Validate the stored §18 document before exporting.
-    const result = validateProject(projectRow.document);
-    if (!result.ok) {
-      return reply
-        .code(422)
-        .send({ error: 'SchemaError', issues: result.errors });
+    // Resolve WHICH §18 document to render:
+    //   • body.document present → render that exact client-supplied snapshot
+    //     (Templates wave: the previewed, prune-of-unfilled-slots document).
+    //     Ownership is already enforced above — `projectId` must belong to the
+    //     caller — so the snapshot cannot change ownership/billing; it still
+    //     exports under the user's `projectId`. A malformed snapshot → 400
+    //     (mirrors POST /projects' document path), never an insert/enqueue.
+    //   • absent → render the stored project by id (the exact prior behaviour).
+    // Either way the SAME settings (watermark: true) + rate-limit + graph build
+    // run below, so the snapshot never bypasses the Free-tier watermark.
+    let project: Project;
+    if (body.document !== undefined && body.document !== null) {
+      const snapshot = validateProject(body.document);
+      if (!snapshot.ok) {
+        return reply
+          .code(400)
+          .send({ error: 'ValidationError', issues: snapshot.errors });
+      }
+      project = snapshot.value;
+    } else {
+      // Validate the stored §18 document before exporting.
+      const result = validateProject(projectRow.document);
+      if (!result.ok) {
+        return reply
+          .code(422)
+          .send({ error: 'SchemaError', issues: result.errors });
+      }
+      project = result.value;
     }
-    const project: Project = result.value;
 
-    // ── Redis sliding-window rate limit: max 5 exports/min per workspace ────
-    const workspaceId = DEV_WORKSPACE;
+    // ── Redis sliding-window rate limit: max 5 exports/min per user ─────────
+    // Atomic prune+count+conditional-add via a single Lua eval (see
+    // RATE_LIMIT_LUA) so concurrent requests can't all slip past the limit.
+    const workspaceId = request.user.userId;
     const rateLimitKey = `rate:export:${workspaceId}`;
     const now = Date.now();
     const windowMs = 60_000;
     const limit = Number(process.env['EXPORT_RATE_LIMIT_PER_MIN'] ?? 5);
+    const member = `${now}-${randomUUID()}`;
 
-    await redisClient.zremrangebyscore(rateLimitKey, '-inf', now - windowMs);
-    const exportCount = await redisClient.zcard(rateLimitKey);
-    if (exportCount >= limit) {
+    const allowed = await redisClient.eval(
+      RATE_LIMIT_LUA,
+      1,
+      rateLimitKey,
+      String(now),
+      String(windowMs),
+      String(limit),
+      member,
+      '61',
+    );
+    if (allowed !== 1) {
       return reply.code(429).send({ error: 'RateLimitExceeded', message: `Export limit: ${limit}/min` });
     }
-    await redisClient.zadd(rateLimitKey, now, `${now}-${Math.random()}`);
-    await redisClient.expire(rateLimitKey, 61);
 
     // Build/validate the FFmpeg command graph (preview only — worker will run it).
     const mergedSettings: ExportSettings = {
@@ -160,7 +234,7 @@ export async function exportRoutes(app: FastifyInstance): Promise<void> {
         .from(assets)
         .where(
           and(
-            eq(assets.workspaceId, DEV_WORKSPACE),
+            eq(assets.workspaceId, request.user.userId),
             inArray(assets.id, assetIds),
           ),
         );
@@ -190,17 +264,19 @@ export async function exportRoutes(app: FastifyInstance): Promise<void> {
     await db.insert(exportJobs).values({
       id: exportId,
       projectId,
-      workspaceId: DEV_WORKSPACE,
+      workspaceId: request.user.userId,
       status: 'QUEUED',
       progress: 0,
-      settings: mergedSettings as unknown as Record<string, unknown>,
+      // Persist warnings alongside settings so GET /exports/:id (the poll path) can
+      // surface the proxy-downgrade warning, not just the POST response.
+      settings: { ...mergedSettings, warnings } as unknown as Record<string, unknown>,
       expiresAt,
     });
 
     const jobData: RenderJobData = {
       exportId,
       projectId,
-      workspaceId: DEV_WORKSPACE,
+      workspaceId: request.user.userId,
       project,
       settings: mergedSettings as unknown as Record<string, unknown>,
       s3Keys,
@@ -218,7 +294,7 @@ export async function exportRoutes(app: FastifyInstance): Promise<void> {
       .where(
         and(
           eq(exportJobs.id, request.params.id),
-          eq(exportJobs.workspaceId, DEV_WORKSPACE),
+          eq(exportJobs.workspaceId, request.user.userId),
         ),
       );
 
@@ -233,6 +309,10 @@ export async function exportRoutes(app: FastifyInstance): Promise<void> {
       outputUrl = await presignGet(BUCKET_EXPORTS, row.s3KeyOutput, 3600);
     }
 
+    // Surface the persisted proxy-downgrade warnings on the poll path too.
+    const settings = (row.settings ?? {}) as { warnings?: unknown };
+    const warnings = Array.isArray(settings.warnings) ? (settings.warnings as string[]) : [];
+
     return {
       exportId: row.id,
       projectId: row.projectId,
@@ -240,6 +320,7 @@ export async function exportRoutes(app: FastifyInstance): Promise<void> {
       progress: row.progress,
       outputUrl,
       errorMessage: row.errorMessage,
+      warnings,
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt.toISOString(),
     };
@@ -255,7 +336,7 @@ export async function exportRoutes(app: FastifyInstance): Promise<void> {
         .where(
           and(
             eq(exportJobs.id, request.params.id),
-            eq(exportJobs.workspaceId, DEV_WORKSPACE),
+            eq(exportJobs.workspaceId, request.user.userId),
           ),
         );
 

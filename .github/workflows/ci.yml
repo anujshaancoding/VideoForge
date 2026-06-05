@@ -8,6 +8,7 @@ on:
 env:
   NODE_VERSION: '20'
   PNPM_VERSION: '9.12.0'
+  FFMPEG_VERSION: '6.1.1'
   POSTGRES_URL: postgresql://videoforge:videoforge_dev@localhost:5432/videoforge
   REDIS_URL: redis://localhost:6379
   S3_ENDPOINT: http://localhost:9000
@@ -20,9 +21,9 @@ env:
   S3_BUCKET_EXPORTS: vf-exports
 
 jobs:
-  # Stage 1: Static analysis
-  static:
-    name: Stage 1 — Typecheck + Lint
+  # ── Stage 1: Typecheck ────────────────────────────────────────────────────
+  typecheck:
+    name: Stage 1 — Typecheck
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,13 +33,12 @@ jobs:
         with: { node-version: '${{ env.NODE_VERSION }}', cache: pnpm }
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
-      - run: pnpm lint
 
-  # Stage 2: Unit + component tests
-  unit:
-    name: Stage 2 — Unit Tests
+  # ── Stage 2: Lint ─────────────────────────────────────────────────────────
+  lint:
+    name: Stage 2 — Lint
     runs-on: ubuntu-latest
-    needs: static
+    needs: typecheck
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -46,14 +46,13 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '${{ env.NODE_VERSION }}', cache: pnpm }
       - run: pnpm install --frozen-lockfile
-      - run: pnpm -r build --filter "./packages/*"
-      - run: pnpm test
+      - run: pnpm lint
 
-  # Stage 3: Integration (schema + export command builder)
-  integration:
-    name: Stage 3 — Integration Tests
+  # ── Stage 3: Unit + Integration tests ────────────────────────────────────
+  unit-integration:
+    name: Stage 3 — Unit + Integration Tests
     runs-on: ubuntu-latest
-    needs: unit
+    needs: lint
     services:
       postgres:
         image: postgres:16-alpine
@@ -68,12 +67,16 @@ jobs:
         ports: ['6379:6379']
         options: --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 3s --health-retries 10
       minio:
-        image: minio/minio
+        image: minio/minio:RELEASE.2025-09-07T16-13-09Z
         env:
           MINIO_ROOT_USER: minioadmin
           MINIO_ROOT_PASSWORD: minioadmin
         ports: ['9000:9000']
-        options: --health-cmd "curl -f http://localhost:9000/minio/health/live" --health-interval 10s --health-timeout 5s --health-retries 5
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/ready"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -86,40 +89,36 @@ jobs:
         env: { DATABASE_URL: '${{ env.POSTGRES_URL }}' }
       - run: pnpm test
 
-  # Stage 4: E2E subset (Playwright, Chromium only)
-  e2e:
-    name: Stage 4 — E2E (PR subset)
-    runs-on: ubuntu-latest
-    needs: integration
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with: { version: '${{ env.PNPM_VERSION }}' }
-      - uses: actions/setup-node@v4
-        with: { node-version: '${{ env.NODE_VERSION }}', cache: pnpm }
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm exec playwright install chromium --with-deps
-      - run: pnpm -r build --filter "./packages/*"
-      - run: pnpm exec playwright test --project=chromium
-        continue-on-error: true
-
-  # Stage 5: Golden-frame fidelity gate
+  # ── Stage 4: Golden-frame fidelity gate ──────────────────────────────────
   golden:
-    name: Stage 5 — Golden Frame Fidelity Gate
+    name: Stage 4 — Golden Frame Fidelity Gate
     runs-on: ubuntu-latest
-    needs: integration
+    needs: unit-integration
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
         with: { version: '${{ env.PNPM_VERSION }}' }
       - uses: actions/setup-node@v4
         with: { node-version: '${{ env.NODE_VERSION }}', cache: pnpm }
-      - name: Install FFmpeg 6.1.1
+      - name: Cache FFmpeg ${{ env.FFMPEG_VERSION }}
+        id: cache-ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: /tmp/ffmpeg-${{ env.FFMPEG_VERSION }}
+          key: ffmpeg-${{ env.FFMPEG_VERSION }}-linux-amd64-static
+      - name: Download FFmpeg ${{ env.FFMPEG_VERSION }}
+        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
         run: |
-          curl -fsSL "https://johnvansickle.com/ffmpeg/releases/ffmpeg-6.1.1-amd64-static.tar.xz" -o /tmp/ff.tar.xz
-          tar -xJf /tmp/ff.tar.xz -C /tmp
-          sudo mv /tmp/ffmpeg-6.1.1-amd64-static/ffmpeg /usr/local/bin/ffmpeg
-          sudo mv /tmp/ffmpeg-6.1.1-amd64-static/ffprobe /usr/local/bin/ffprobe
+          curl -fsSL "https://johnvansickle.com/ffmpeg/releases/ffmpeg-${{ env.FFMPEG_VERSION }}-amd64-static.tar.xz" \
+            -o /tmp/ff.tar.xz
+          mkdir -p /tmp/ffmpeg-${{ env.FFMPEG_VERSION }}
+          tar -xJf /tmp/ff.tar.xz -C /tmp/ffmpeg-${{ env.FFMPEG_VERSION }} --strip-components=1
+      - name: Install FFmpeg ${{ env.FFMPEG_VERSION }} into PATH
+        run: |
+          sudo cp /tmp/ffmpeg-${{ env.FFMPEG_VERSION }}/ffmpeg /usr/local/bin/ffmpeg
+          sudo cp /tmp/ffmpeg-${{ env.FFMPEG_VERSION }}/ffprobe /usr/local/bin/ffprobe
+          sudo chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe
+          ffmpeg -version | head -1
       - run: pnpm install --frozen-lockfile
       - run: pnpm -r build --filter "./packages/*"
       - run: tsx scripts/generate-fixtures.ts
@@ -127,11 +126,11 @@ jobs:
       - run: pnpm test:golden
         env:
           FFMPEG_PATH: /usr/local/bin/ffmpeg
-          FFMPEG_PINNED_VERSION: '6.1.1'
+          FFMPEG_PINNED_VERSION: '${{ env.FFMPEG_VERSION }}'
 
-  # Stage 6: Perf gates (export throughput baseline)
+  # ── Stage 5: Perf gates ───────────────────────────────────────────────────
   perf:
-    name: Stage 6 — Perf Gates
+    name: Stage 5 — Perf Gates
     runs-on: ubuntu-latest
     needs: golden
     steps:
@@ -140,13 +139,56 @@ jobs:
         with: { version: '${{ env.PNPM_VERSION }}' }
       - uses: actions/setup-node@v4
         with: { node-version: '${{ env.NODE_VERSION }}', cache: pnpm }
-      - name: Install FFmpeg 6.1.1
+      - name: Cache FFmpeg ${{ env.FFMPEG_VERSION }}
+        id: cache-ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: /tmp/ffmpeg-${{ env.FFMPEG_VERSION }}
+          key: ffmpeg-${{ env.FFMPEG_VERSION }}-linux-amd64-static
+      - name: Download FFmpeg ${{ env.FFMPEG_VERSION }}
+        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
         run: |
-          curl -fsSL "https://johnvansickle.com/ffmpeg/releases/ffmpeg-6.1.1-amd64-static.tar.xz" -o /tmp/ff.tar.xz
-          tar -xJf /tmp/ff.tar.xz -C /tmp
-          sudo mv /tmp/ffmpeg-6.1.1-amd64-static/ffmpeg /usr/local/bin/ffmpeg
+          curl -fsSL "https://johnvansickle.com/ffmpeg/releases/ffmpeg-${{ env.FFMPEG_VERSION }}-amd64-static.tar.xz" \
+            -o /tmp/ff.tar.xz
+          mkdir -p /tmp/ffmpeg-${{ env.FFMPEG_VERSION }}
+          tar -xJf /tmp/ff.tar.xz -C /tmp/ffmpeg-${{ env.FFMPEG_VERSION }} --strip-components=1
+      - name: Install FFmpeg ${{ env.FFMPEG_VERSION }} into PATH
+        run: |
+          sudo cp /tmp/ffmpeg-${{ env.FFMPEG_VERSION }}/ffmpeg /usr/local/bin/ffmpeg
+          sudo chmod +x /usr/local/bin/ffmpeg
+          ffmpeg -version | head -1
       - run: pnpm install --frozen-lockfile
       - run: pnpm -r build --filter "./packages/*"
       - run: tsx scripts/generate-fixtures.ts
       - run: pnpm test:perf
         env: { FFMPEG_PATH: /usr/local/bin/ffmpeg }
+
+  # ── Stage 6: E2E (Playwright, Chromium-only, PR subset) ──────────────────
+  e2e:
+    name: Stage 6 — E2E (PR subset)
+    runs-on: ubuntu-latest
+    needs: perf
+    env:
+      BASE_URL: http://localhost:4173
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: '${{ env.PNPM_VERSION }}' }
+      - uses: actions/setup-node@v4
+        with: { node-version: '${{ env.NODE_VERSION }}', cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -r build --filter "./packages/*"
+      - name: Build web app
+        run: pnpm --filter @videoforge/web build
+        env:
+          VITE_API_BASE_URL: http://localhost:4000/api/v1
+          VITE_WS_URL: ws://localhost:4000/ws
+          VITE_SENTRY_DSN: ''
+      - name: Serve web app (background)
+        run: |
+          pnpm --filter @videoforge/web preview --port 4173 --host &
+          # Wait for the preview server to be ready
+          npx --yes wait-on http://localhost:4173 --timeout 30000
+      - run: pnpm exec playwright install chromium --with-deps
+      - run: pnpm exec playwright test --project=chromium
+        continue-on-error: true

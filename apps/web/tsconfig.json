@@ -17,8 +17,8 @@
     "declarationMap": false,
     "incremental": false,
     "outDir": "dist",
-    "types": ["vite/client"]
+    "types": ["vite/client", "vitest/globals", "@testing-library/jest-dom"]
   },
-  "include": ["src", "vite.config.ts"],
+  "include": ["src", "vite.config.ts", "vitest.config.ts"],
   "exclude": ["node_modules", "dist"]
 }

@@ -9,6 +9,8 @@ import {
 } from "../lib/projectStore.js";
 import { Button, Modal } from "../components/ui/index.js";
 import { cx } from "../components/ui/cx.js";
+import { markFirstSession } from "../lib/firstSession.js";
+import { useAuthStore } from "../store/authStore.js";
 
 // Project Dashboard (§4.2) — the creator's home. Card grid + persistent create-tile
 // + empty state. Open / Duplicate / Delete (delete is confirm-gated, no undo in
@@ -56,22 +58,24 @@ function ProjectCard({
 
   return (
     <li className="relative">
+      {/* Card is a non-interactive container. The open affordance is a single
+          "stretched" button covering the card (below the content), and the actions
+          button sits ABOVE it (z-10) as a SIBLING — so no interactive element is
+          nested inside another (WCAG 4.1.2 / axe nested-interactive). */}
       <div
-        role="button"
-        tabIndex={0}
-        onClick={onOpen}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            onOpen();
-          }
-        }}
         className={cx(
-          "group flex cursor-pointer flex-col overflow-hidden rounded-xl border border-vf-border-subtle bg-vf-surface-1",
+          "group relative flex cursor-pointer flex-col overflow-hidden rounded-xl border border-vf-border-subtle bg-vf-surface-1",
           "transition-colors duration-[var(--vf-motion-duration)] hover:border-vf-border-strong hover:bg-vf-surface-2",
+          "focus-within:border-vf-border-strong",
         )}
       >
-        <div className="relative flex aspect-video items-center justify-center bg-vf-surface-2">
+        <button
+          type="button"
+          aria-label={`Open ${project.title}`}
+          onClick={onOpen}
+          className="absolute inset-0 z-0 cursor-pointer rounded-xl outline-none focus-visible:ring-2 focus-visible:ring-vf-accent"
+        />
+        <div className="pointer-events-none relative flex aspect-video items-center justify-center bg-vf-surface-2">
           <AspectGlyph width={project.width} height={project.height} />
           {busy && (
             <div className="absolute inset-0 flex items-center justify-center bg-vf-overlay-scrim text-xs text-vf-text-secondary">
@@ -85,8 +89,8 @@ function ProjectCard({
               : project.aspectRatio}
           </span>
         </div>
-        <div className="flex items-center justify-between gap-2 px-3 py-2">
-          <div className="min-w-0">
+        <div className="relative flex items-center justify-between gap-2 px-3 py-2">
+          <div className="pointer-events-none min-w-0">
             <div className="truncate text-sm font-medium text-vf-text-primary" title={project.title}>
               {project.title}
             </div>
@@ -104,7 +108,7 @@ function ProjectCard({
               e.stopPropagation();
               setMenuOpen((v) => !v);
             }}
-            className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-sm text-vf-icon-muted hover:bg-vf-surface-3 hover:text-vf-text-primary"
+            className="relative z-10 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-sm text-vf-icon-muted hover:bg-vf-surface-3 hover:text-vf-text-primary"
           >
             <span aria-hidden="true">⋯</span>
           </button>
@@ -157,6 +161,71 @@ function ProjectCard({
   );
 }
 
+function AccountMenu() {
+  const user = useAuthStore((s) => s.user);
+  const logout = useAuthStore((s) => s.logout);
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const dismiss = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", dismiss);
+    return () => document.removeEventListener("mousedown", dismiss);
+  }, [open]);
+
+  const label = user?.displayName || user?.email || "Account";
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        aria-label="Account menu"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        className="inline-flex h-8 items-center gap-1 rounded-pill border border-vf-border-default px-2 text-xs text-vf-text-secondary hover:bg-vf-surface-2"
+      >
+        <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-vf-surface-3 text-vf-text-primary">
+          ◑
+        </span>
+        <span className="max-w-[140px] truncate">{label}</span>
+        <span aria-hidden="true">▾</span>
+      </button>
+      {open && (
+        <div
+          role="menu"
+          className="absolute right-0 top-full z-dropdown mt-1 w-56 overflow-hidden rounded-md border border-vf-border-subtle bg-vf-surface-3 py-1 shadow-vf-2"
+        >
+          {user && (
+            <div className="border-b border-vf-border-subtle px-3 py-2">
+              {user.displayName && (
+                <div className="truncate text-sm font-medium text-vf-text-primary">
+                  {user.displayName}
+                </div>
+              )}
+              <div className="truncate text-xs text-vf-text-tertiary">{user.email}</div>
+            </div>
+          )}
+          <button
+            role="menuitem"
+            type="button"
+            className="block w-full px-3 py-1.5 text-left text-sm text-vf-text-primary hover:bg-vf-surface-4"
+            onClick={() => {
+              setOpen(false);
+              void logout();
+            }}
+          >
+            Sign out
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const navigate = useNavigate();
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
@@ -174,7 +243,12 @@ export default function Dashboard() {
     setLoading(true);
     listProjects()
       .then((items) => {
-        if (!cancelled) setProjects(items);
+        if (cancelled) return;
+        setProjects(items);
+        // First-session mechanic (§6): a brand-new creator with no projects gets the
+        // flag set on first load; it's cleared on their first successful export. Only
+        // set on a genuinely empty dashboard so returning creators aren't re-flagged.
+        if (items.length === 0) markFirstSession();
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -220,16 +294,7 @@ export default function Dashboard() {
           </span>
           <span className="text-md font-bold tracking-tight text-vf-text-primary">VideoForge</span>
         </div>
-        <button
-          type="button"
-          aria-label="Account menu"
-          className="inline-flex h-8 items-center gap-1 rounded-pill border border-vf-border-default px-2 text-xs text-vf-text-secondary hover:bg-vf-surface-2"
-        >
-          <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-vf-surface-3 text-vf-text-primary">
-            ◑
-          </span>
-          <span aria-hidden="true">▾</span>
-        </button>
+        <AccountMenu />
       </header>
 
       <main className="flex-1 px-6 py-8">
@@ -249,13 +314,13 @@ export default function Dashboard() {
             >
               ▶
             </div>
-            <h1 className="text-2xl font-bold text-vf-text-primary">Create your first video</h1>
+            <h1 className="text-2xl font-bold text-vf-text-primary">Drop a video to start</h1>
             <p className="mt-3 text-base text-vf-text-secondary">
-              Import footage, cut it on a real multi-track timeline, and export an MP4 that matches
-              your edit exactly — what you cut is what you get.
+              Import → arrange → export — usually under 10 minutes. What you cut is what you get.
             </p>
             <div className="mt-8">
-              <Button variant="primary" size="lg" onClick={() => navigate("/new")}>
+              {/* Non-amber: amber is reserved for the single Export CTA + brand (§2.3). */}
+              <Button variant="secondary" size="lg" onClick={() => navigate("/new")}>
                 + New project
               </Button>
             </div>
@@ -264,7 +329,8 @@ export default function Dashboard() {
           <>
             <div className="mb-6 flex items-center justify-between">
               <h1 className="text-xl font-bold text-vf-text-primary">Your projects</h1>
-              <Button variant="primary" onClick={() => navigate("/new")}>
+              {/* Non-amber: amber is reserved for the single Export CTA + brand (§2.3). */}
+              <Button variant="secondary" onClick={() => navigate("/new")}>
                 + New
               </Button>
             </div>

@@ -1,12 +1,22 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import {
   selectProjectDurationMs,
   useEditorStore,
   type AddTrackKind,
 } from "../../store/editorStore.js";
+import { getAssetMeta } from "../../store/assetStore.js";
 import { msToTimecode } from "@videoforge/project-schema";
 import type { Clip, Track } from "@videoforge/project-schema";
 import { cx, IconButton, Tooltip } from "../ui/index.js";
+import { resolveManifest } from "../../store/templateStore.js";
+import { isSlotFilled } from "../../lib/templates.js";
+
+/** Per-clip placeholder-slot info for the dashed timeline block (null = not a placeholder). */
+export interface SlotInfo {
+  label: string;
+  index: number;
+  total: number;
+}
 
 // Timeline — bottom band, the hero edit surface (§6). Zero-prop, store-driven.
 //   • sticky ruler with adaptive timecode ticks (density from pxPerSecond)
@@ -15,11 +25,15 @@ import { cx, IconButton, Tooltip } from "../ui/index.js";
 //   • draggable red playhead; click ruler → setPlayhead; click clip → select
 //   • Audio-Link chain glyph on linked clips; orange snap line during drag
 //   • "+ Add track" honours Free-tier ceilings (disabled tooltip, NO upsell)
-//   • real-but-modest interactions: click-select, drag-to-move (moveClip), edge trim
-//     handles (trimClip). MVP-STUB: rubber-band, ripple, cross-track swap deferred.
+//   • interactions: click-select; drag-to-move with snapping + cross-track drop;
+//     edge trim handles. The drag is TRANSIENT — it previews via local state and
+//     commits ONCE to the store on pointer-up (so a single drag is one undo step,
+//     not hundreds, and the doc isn't re-serialised every frame). Hold Alt to
+//     disable snapping.
 
 const HEADER_W = 180; // §2.1 pinned track-header column width
 const RULER_H = 32;
+const SNAP_PX = 8; // snap-to-edge threshold in screen pixels (§3.5)
 
 // Free-tier track ceilings (MVP_Scope §3.2 / §15.2): 3 video · 2 audio · 2 overlay.
 const TRACK_CAPS: Record<AddTrackKind, number> = {
@@ -45,13 +59,28 @@ const TYPE_TINT: Record<string, string> = {
   caption: "bg-vf-track-caption-fill border-vf-track-caption",
 };
 
+type DragMode = "move" | "trim-start" | "trim-end";
+
 interface DragState {
   clipId: string;
+  /** The clip's own track (source lane). */
   trackId: string;
-  mode: "move" | "trim-start" | "trim-end";
+  /** Whether the dragged clip is audio-bearing (gates compatible destination lanes). */
+  isAudio: boolean;
+  mode: DragMode;
   startX: number;
   originStartMs: number;
   originEndMs: number;
+}
+
+/** Live (uncommitted) drag preview — drives the dragged block's position only. */
+interface DragPreview {
+  startMs: number;
+  endMs: number;
+  /** Destination track for a cross-track move (= source track for trims). */
+  trackId: string;
+  /** Snap-line x in px, or null. */
+  snapX: number | null;
 }
 
 export default function Timeline() {
@@ -74,11 +103,13 @@ export default function Timeline() {
   const splitAtPlayhead = useEditorStore((s) => s.splitAtPlayhead);
   const setTrackMute = useEditorStore((s) => s.setTrackMute);
   const setTrackSolo = useEditorStore((s) => s.setTrackSolo);
+  const addCrossfade = useEditorStore((s) => s.addCrossfade);
+  const detachAudio = useEditorStore((s) => s.detachAudio);
   const setZoom = useEditorStore((s) => s.setZoom);
 
   const bodyRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
-  const [snapX, setSnapX] = useState<number | null>(null);
+  const [preview, setPreview] = useState<DragPreview | null>(null);
 
   // Right-click context menu on media clips.
   const [clipCtx, setClipCtx] = useState<{
@@ -87,6 +118,7 @@ export default function Timeline() {
     x: number;
     y: number;
   } | null>(null);
+  const [trackCtx, setTrackCtx] = useState<{ trackId: string; x: number; y: number } | null>(null);
 
   useEffect(() => {
     if (!clipCtx) return;
@@ -95,9 +127,23 @@ export default function Timeline() {
     return () => document.removeEventListener("mousedown", dismiss);
   }, [clipCtx]);
 
+  useEffect(() => {
+    if (!trackCtx) return;
+    const dismiss = () => setTrackCtx(null);
+    document.addEventListener("mousedown", dismiss);
+    return () => document.removeEventListener("mousedown", dismiss);
+  }, [trackCtx]);
+
   const pxPerMs = pxPerSecond / 1000;
   // The content width spans the project duration plus a tail of empty room.
   const contentWidthPx = Math.max(800, (durationMs + 4000) * pxPerMs);
+
+  // Empty-state hint (§6.3): show a centered prompt while no media/overlay clips exist.
+  // Caption-only blocks don't count as "real" timeline content for the first-clip aha.
+  const hasClips = useMemo(
+    () => tracks.some((t) => "clips" in t && t.clips.length > 0),
+    [tracks],
+  );
 
   // All lanes top→bottom: media/overlay tracks then caption tracks (§6.2 order is a
   // design nicety; we render in array order which already encodes z-order, §18).
@@ -105,6 +151,21 @@ export default function Timeline() {
     () => [...tracks, ...captionTracks],
     [tracks, captionTracks],
   );
+
+  // Template placeholder slots → dashed clip blocks with a "N of M" badge. Only
+  // UNFILLED media slots render as placeholders (a filled slot is a normal clip).
+  const project = useEditorStore((s) => s.project);
+  const placeholderSlots = useMemo<Map<string, SlotInfo>>(() => {
+    const map = new Map<string, SlotInfo>();
+    const manifest = resolveManifest(project);
+    if (!manifest) return map;
+    for (const slot of manifest.slots) {
+      if (slot.target.type !== "clip") continue;
+      if (isSlotFilled(project, slot)) continue;
+      map.set(slot.target.clipId, { label: slot.label, index: slot.index, total: slot.total });
+    }
+    return map;
+  }, [project]);
 
   // ── Ruler ticks: adapt density to zoom so labels never collide. ──
   const tickEverySec = useMemo(() => {
@@ -128,12 +189,54 @@ export default function Timeline() {
     setPlayhead(Math.max(0, x / pxPerMs));
   };
 
-  // ── Pointer-driven clip move / trim ──
+  const minClipMs = Math.max(1, Math.round(1000 / (fps || 30)));
+
+  // Snap candidates: every OTHER media clip's start/end edge, the playhead, and 0.
+  const snapEdgesFor = (excludeClipId: string): number[] => {
+    const edges: number[] = [0, playheadMs];
+    for (const t of tracks) {
+      if (t.type !== "video" && t.type !== "audio" && t.type !== "voiceover") continue;
+      for (const c of t.clips) {
+        if (c.id === excludeClipId) continue;
+        edges.push(c.startOnTimeline, c.endOnTimeline);
+      }
+    }
+    return edges;
+  };
+
+  // Snap `ms` to the nearest candidate edge within SNAP_PX; returns the snapped ms.
+  const snapMs = (ms: number, edges: number[]): { ms: number; dist: number } => {
+    let bestMs = ms;
+    let bestDist = Infinity;
+    for (const e of edges) {
+      const d = Math.abs(e - ms);
+      if (d * pxPerMs <= SNAP_PX && d < bestDist) {
+        bestDist = d;
+        bestMs = e;
+      }
+    }
+    return { ms: bestMs, dist: bestDist };
+  };
+
+  // Which media track lane the pointer Y is over (for cross-track move).
+  const trackAtClientY = (clientY: number): Track | null => {
+    const body = bodyRef.current;
+    if (!body) return null;
+    const top = body.getBoundingClientRect().top;
+    let acc = top;
+    for (const t of allTracks) {
+      if (clientY >= acc && clientY < acc + t.height) return t;
+      acc += t.height;
+    }
+    return null;
+  };
+
+  // ── Pointer-driven clip move / trim (transient → commit on pointer-up) ──
   const onClipPointerDown = (
     e: React.PointerEvent,
     clip: Clip,
     track: Track,
-    mode: DragState["mode"],
+    mode: DragMode,
   ): void => {
     e.stopPropagation();
     if (track.locked) return;
@@ -142,32 +245,69 @@ export default function Timeline() {
     setDrag({
       clipId: clip.id,
       trackId: track.id,
+      isAudio: track.type === "audio" || track.type === "voiceover",
       mode,
       startX: e.clientX,
       originStartMs: clip.startOnTimeline,
       originEndMs: clip.endOnTimeline,
+    });
+    setPreview({
+      startMs: clip.startOnTimeline,
+      endMs: clip.endOnTimeline,
+      trackId: track.id,
+      snapX: null,
     });
   };
 
   const onBodyPointerMove = (e: React.PointerEvent): void => {
     if (!drag) return;
     const deltaMs = (e.clientX - drag.startX) / pxPerMs;
+    const alt = e.altKey; // hold Alt to disable snapping
+    const edges = alt ? [] : snapEdgesFor(drag.clipId);
+    const span = drag.originEndMs - drag.originStartMs;
+
     if (drag.mode === "move") {
-      const next = Math.max(0, drag.originStartMs + deltaMs);
-      moveClip(drag.clipId, drag.trackId, next);
-      setSnapX(next * pxPerMs); // simple snap-line affordance at the new start edge
+      let start = Math.max(0, drag.originStartMs + deltaMs);
+      // Snap whichever edge (start/end) lands closest to a candidate.
+      const s = snapMs(start, edges);
+      const eSnap = snapMs(start + span, edges);
+      if (s.dist <= eSnap.dist && s.dist !== Infinity) start = s.ms;
+      else if (eSnap.dist !== Infinity) start = Math.max(0, eSnap.ms - span);
+      // Cross-track: move to the compatible lane under the pointer.
+      const overTrack = trackAtClientY(e.clientY);
+      const dest =
+        overTrack &&
+        ((drag.isAudio && (overTrack.type === "audio" || overTrack.type === "voiceover")) ||
+          (!drag.isAudio && overTrack.type === "video"))
+          ? overTrack.id
+          : drag.trackId;
+      setPreview({ startMs: start, endMs: start + span, trackId: dest, snapX: start * pxPerMs });
     } else if (drag.mode === "trim-start") {
-      trimClip(drag.clipId, "start", drag.originStartMs + deltaMs);
-      setSnapX((drag.originStartMs + deltaMs) * pxPerMs);
+      let start = Math.min(Math.max(0, drag.originStartMs + deltaMs), drag.originEndMs - minClipMs);
+      const s = snapMs(start, edges);
+      if (s.dist !== Infinity) start = Math.min(s.ms, drag.originEndMs - minClipMs);
+      setPreview({ startMs: start, endMs: drag.originEndMs, trackId: drag.trackId, snapX: start * pxPerMs });
     } else {
-      trimClip(drag.clipId, "end", drag.originEndMs + deltaMs);
-      setSnapX((drag.originEndMs + deltaMs) * pxPerMs);
+      let end = Math.max(drag.originStartMs + minClipMs, drag.originEndMs + deltaMs);
+      const s = snapMs(end, edges);
+      if (s.dist !== Infinity) end = Math.max(drag.originStartMs + minClipMs, s.ms);
+      setPreview({ startMs: drag.originStartMs, endMs: end, trackId: drag.trackId, snapX: end * pxPerMs });
     }
   };
 
+  // Commit the transient drag to the store as a SINGLE undoable op.
   const endDrag = (): void => {
+    if (drag && preview) {
+      if (drag.mode === "move") {
+        moveClip(drag.clipId, preview.trackId, preview.startMs);
+      } else if (drag.mode === "trim-start") {
+        trimClip(drag.clipId, "start", preview.startMs);
+      } else {
+        trimClip(drag.clipId, "end", preview.endMs);
+      }
+    }
     setDrag(null);
-    setSnapX(null);
+    setPreview(null);
   };
 
   // Called by TrackBody when an asset is dropped onto a lane from the MediaPanel.
@@ -176,8 +316,12 @@ export default function Timeline() {
     if (!body) return;
     const rect = body.getBoundingClientRect();
     const x = clientX - rect.left + body.scrollLeft;
-    const dropMs = Math.max(0, x / pxPerMs);
-    addClipFromAsset(assetId, trackId, dropMs);
+    let dropMs = Math.max(0, x / pxPerMs);
+    // Snap the drop to nearby edges + playhead too.
+    const snapped = snapMs(dropMs, snapEdgesFor(assetId));
+    if (snapped.dist !== Infinity) dropMs = snapped.ms;
+    const durationMs = getAssetMeta(assetId)?.durationMs ?? undefined;
+    addClipFromAsset(assetId, trackId, dropMs, durationMs);
   };
 
   return (
@@ -217,7 +361,22 @@ export default function Timeline() {
       </div>
 
       {/* ── Track stack (headers + bodies share a scroll context) ── */}
-      <div className="flex min-h-0 flex-1 overflow-y-auto">
+      <div className="relative flex min-h-0 flex-1 overflow-y-auto">
+        {/* Empty-state hint: centered over the bodies viewport (offset past the pinned
+            header column). Pointer-transparent so it never blocks a drop. Vanishes the
+            moment the first clip lands — part of "aha" moment A (timeline comes alive). */}
+        {!hasClips && (
+          <div
+            aria-hidden="true"
+            data-testid="timeline-empty-hint"
+            className="pointer-events-none absolute inset-y-0 right-0 z-10 flex items-center justify-center"
+            style={{ left: HEADER_W }}
+          >
+            <p className="max-w-[260px] text-center text-xs text-vf-text-tertiary">
+              Drag a clip here, or double-click media to add it. Your edit builds left-to-right.
+            </p>
+          </div>
+        )}
         {/* Header column (does not horizontal-scroll). */}
         <div className="shrink-0 border-r border-vf-border-subtle" style={{ width: HEADER_W }}>
           {allTracks.map((track) => (
@@ -228,6 +387,10 @@ export default function Timeline() {
               onSelect={() => select("track", track.id)}
               onMute={(v) => setTrackMute(track.id, v)}
               onSolo={(v) => setTrackSolo(track.id, v)}
+              onContextMenu={(x, y) => {
+                select("track", track.id);
+                setTrackCtx({ trackId: track.id, x, y });
+              }}
             />
           ))}
         </div>
@@ -247,6 +410,9 @@ export default function Timeline() {
                 track={track}
                 pxPerMs={pxPerMs}
                 selectionId={selection.id}
+                dragClipId={drag?.clipId ?? null}
+                dragPreview={preview}
+                placeholderSlots={placeholderSlots}
                 onClipDown={onClipPointerDown}
                 onSelectCaption={(id) => select("caption", id)}
                 onSelectOverlay={(id) => select("overlay", id)}
@@ -259,11 +425,11 @@ export default function Timeline() {
             ))}
 
             {/* Snap-line affordance (orange) during a drag (§6.6). */}
-            {snapX !== null && (
+            {preview?.snapX != null && (
               <div
                 aria-hidden="true"
                 className="pointer-events-none absolute top-0 z-sticky h-full w-0.5 bg-vf-snap-line"
-                style={{ left: snapX }}
+                style={{ left: preview.snapX }}
               />
             )}
 
@@ -325,6 +491,22 @@ export default function Timeline() {
           >
             ⧉ Duplicate
           </button>
+          <button
+            role="menuitem"
+            type="button"
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs text-vf-text-primary hover:bg-vf-surface-4"
+            onClick={() => { addCrossfade(clipCtx.clipId); setClipCtx(null); }}
+          >
+            ⤫ Crossfade to next
+          </button>
+          <button
+            role="menuitem"
+            type="button"
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs text-vf-text-primary hover:bg-vf-surface-4"
+            onClick={() => { detachAudio(clipCtx.clipId); setClipCtx(null); }}
+          >
+            🔗 Detach audio
+          </button>
           <div className="my-1 border-t border-vf-border-subtle" />
           <button
             role="menuitem"
@@ -333,6 +515,30 @@ export default function Timeline() {
             onClick={() => { deleteSelected(); setClipCtx(null); }}
           >
             🗑 Delete
+          </button>
+        </div>
+      )}
+
+      {/* Track-header right-click context menu. */}
+      {trackCtx && (
+        <div
+          role="menu"
+          data-testid="track-context-menu"
+          style={{ position: "fixed", top: trackCtx.y, left: trackCtx.x }}
+          className="z-[9999] w-44 rounded-md border border-vf-border-subtle bg-vf-surface-3 p-1 shadow-vf-2"
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <button
+            role="menuitem"
+            type="button"
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs text-vf-danger-fg hover:bg-vf-surface-4"
+            onClick={() => {
+              select("track", trackCtx.trackId);
+              deleteSelected();
+              setTrackCtx(null);
+            }}
+          >
+            🗑 Delete track
           </button>
         </div>
       )}
@@ -374,17 +580,24 @@ function TrackHeader({
   onSelect,
   onMute,
   onSolo,
+  onContextMenu,
 }: {
   track: Track;
   selected: boolean;
   onSelect: () => void;
   onMute: (v: boolean) => void;
   onSolo: (v: boolean) => void;
+  onContextMenu: (x: number, y: number) => void;
 }) {
   const isAudio = track.type === "audio" || track.type === "voiceover";
   return (
     <div
       onClick={onSelect}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onContextMenu(e.clientX, e.clientY);
+      }}
       className={cx(
         "flex flex-col justify-center gap-1 border-b border-vf-border-subtle px-2",
         selected ? "bg-vf-surface-3" : "bg-vf-surface-2",
@@ -447,6 +660,9 @@ function TrackBody({
   track,
   pxPerMs,
   selectionId,
+  dragClipId,
+  dragPreview,
+  placeholderSlots,
   onClipDown,
   onSelectCaption,
   onSelectOverlay,
@@ -456,19 +672,28 @@ function TrackBody({
   track: Track;
   pxPerMs: number;
   selectionId: string | null;
-  onClipDown: (e: React.PointerEvent, clip: Clip, track: Track, mode: DragState["mode"]) => void;
+  dragClipId: string | null;
+  dragPreview: DragPreview | null;
+  placeholderSlots: Map<string, SlotInfo>;
+  onClipDown: (e: React.PointerEvent, clip: Clip, track: Track, mode: DragMode) => void;
   onSelectCaption: (id: string) => void;
   onSelectOverlay: (id: string) => void;
   onDropClip: (assetId: string, clientX: number, trackId: string) => void;
   onClipContextMenu: (clipId: string, trackId: string, x: number, y: number) => void;
 }) {
   const canReceiveDrop = track.type === "video" || track.type === "audio" || track.type === "voiceover";
+  // The dragged clip renders at its live preview position only on its DESTINATION lane.
+  const isDropTarget = dragPreview?.trackId === track.id;
+
+  const containsDragged = canReceiveDrop && track.clips.some((c) => c.id === dragClipId);
+  const crossTrackTarget = isDropTarget && dragClipId != null && !containsDragged;
 
   // Caption + overlay clips do not carry the media Clip shape; render minimal blocks.
   return (
     <div
       className={cx(
         "relative border-b border-vf-border-subtle",
+        crossTrackTarget && "bg-vf-selection/10 ring-1 ring-inset ring-vf-selection/40",
         track.locked && "[background-image:repeating-linear-gradient(45deg,transparent,transparent_6px,rgba(255,255,255,0.03)_6px,rgba(255,255,255,0.03)_12px)]",
       )}
       style={{ height: track.height }}
@@ -540,6 +765,8 @@ function TrackBody({
                 track={track}
                 pxPerMs={pxPerMs}
                 selected={selectionId === clip.id}
+                previewOverride={clip.id === dragClipId ? dragPreview : null}
+                slotInfo={placeholderSlots.get(clip.id) ?? null}
                 onClipDown={onClipDown}
                 onContextMenu={(x, y) => onClipContextMenu(clip.id, track.id, x, y)}
               />
@@ -549,11 +776,15 @@ function TrackBody({
 }
 
 // ── A single media (video / audio) clip block with trim handles ──────────────────
-function MediaClipBlock({
+// Memoised so a drag (which only changes the dragged clip's override) and unrelated
+// store updates do not re-render every clip on the timeline (§3.1 perf substrate).
+const MediaClipBlock = memo(function MediaClipBlock({
   clip,
   track,
   pxPerMs,
   selected,
+  previewOverride,
+  slotInfo,
   onClipDown,
   onContextMenu,
 }: {
@@ -561,27 +792,53 @@ function MediaClipBlock({
   track: Track;
   pxPerMs: number;
   selected: boolean;
-  onClipDown: (e: React.PointerEvent, clip: Clip, track: Track, mode: DragState["mode"]) => void;
+  previewOverride: DragPreview | null;
+  slotInfo: SlotInfo | null;
+  onClipDown: (e: React.PointerEvent, clip: Clip, track: Track, mode: DragMode) => void;
   onContextMenu: (x: number, y: number) => void;
 }) {
-  const left = clip.startOnTimeline * pxPerMs;
-  const width = Math.max(16, (clip.endOnTimeline - clip.startOnTimeline) * pxPerMs);
+  // During a drag, render at the live (uncommitted) preview position.
+  const startMs = previewOverride?.startMs ?? clip.startOnTimeline;
+  const endMs = previewOverride?.endMs ?? clip.endOnTimeline;
+  const left = startMs * pxPerMs;
+  const width = Math.max(16, (endMs - startMs) * pxPerMs);
   const isAudio = track.type === "audio" || track.type === "voiceover";
+  // Unfilled template media slot → dashed placeholder block (Templates_Design §2.1).
+  // Dashed border is reserved EXCLUSIVELY for slot clips (design guardrail).
+  const isPlaceholder = slotInfo !== null;
 
   return (
     <div
       role="gridcell"
       aria-selected={selected}
       data-testid={`clip-${clip.id}`}
+      data-placeholder={isPlaceholder ? "true" : undefined}
       onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); onContextMenu(e.clientX, e.clientY); }}
       onPointerDown={(e) => onClipDown(e, clip, track, "move")}
       className={cx(
         "group absolute top-1 flex h-[calc(100%-8px)] cursor-move flex-col overflow-hidden rounded-xs border",
-        isAudio ? TYPE_TINT.audio : TYPE_TINT.video,
+        isPlaceholder
+          ? "border-dashed border-vf-border-default bg-vf-surface-2"
+          : isAudio
+            ? TYPE_TINT.audio
+            : TYPE_TINT.video,
         selected ? "border-2 border-vf-selection" : "",
       )}
       style={{ left, width }}
     >
+      {isPlaceholder ? (
+        // Slot placeholder: icon + "Drop your photo or video here" + "N of M" badge.
+        <div className="flex h-full w-full items-center gap-2 px-2">
+          <span aria-hidden="true" className="text-vf-icon-muted">▦</span>
+          <span className="truncate text-xs font-medium text-vf-text-tertiary">
+            Drop your photo or video here
+          </span>
+          <span className="ml-auto shrink-0 text-2xs text-vf-text-disabled">
+            {slotInfo!.index} of {slotInfo!.total}
+          </span>
+        </div>
+      ) : (
+        <>
       {/* Label strip (video) */}
       <div className="flex h-4 shrink-0 items-center gap-1 bg-black/25 px-1">
         <span className="truncate text-2xs text-vf-text-primary">
@@ -599,19 +856,14 @@ function MediaClipBlock({
         )}
       </div>
 
-      {/* Body: faux waveform for audio, plain fill for video */}
+      {/* Body: real waveform peaks for audio, plain fill for video */}
       <div className="relative min-h-0 flex-1">
         {isAudio ? (
-          <svg className="h-full w-full" preserveAspectRatio="none" viewBox="0 0 100 20" aria-hidden="true">
-            <path
-              d={fauxWaveform()}
-              fill="none"
-              stroke="var(--vf-track-audio-waveform)"
-              strokeWidth="0.6"
-            />
-          </svg>
+          <ClipWaveform assetId={clip.sourceAssetId} trimInMs={clip.trimIn} trimOutMs={clip.trimOut} />
         ) : null}
       </div>
+        </>
+      )}
 
       {/* Trim handles (8px grab zones; appear on hover/selection) */}
       <div
@@ -626,14 +878,84 @@ function MediaClipBlock({
       />
     </div>
   );
+});
+
+// ── Real waveform peaks for an audio clip ─────────────────────────────────────────
+// Fetches the asset's waveform-peaks JSON (written by the worker's analysis job) and
+// renders the slice corresponding to the clip's [trimIn, trimOut] window. Falls back
+// to a flat baseline while loading / when unavailable — never a fake sine.
+
+const waveformPeaksCache = new Map<string, number[]>();
+
+function ClipWaveform({
+  assetId,
+  trimInMs,
+  trimOutMs,
+}: {
+  assetId: string;
+  trimInMs: number;
+  trimOutMs: number;
+}) {
+  const [peaks, setPeaks] = useState<number[] | null>(waveformPeaksCache.get(assetId) ?? null);
+
+  useEffect(() => {
+    if (peaks) return;
+    const url = getAssetMeta(assetId)?.waveformUrl;
+    if (!url) return;
+    let cancelled = false;
+    void fetch(url)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: unknown) => {
+        if (cancelled || data == null) return;
+        const arr: number[] = Array.isArray(data)
+          ? (data as number[])
+          : Array.isArray((data as { peaks?: number[] }).peaks)
+            ? (data as { peaks: number[] }).peaks
+            : [];
+        if (arr.length) {
+          waveformPeaksCache.set(assetId, arr);
+          setPeaks(arr);
+        }
+      })
+      .catch(() => { /* non-fatal: keep the flat baseline */ });
+    return () => { cancelled = true; };
+  }, [assetId, peaks]);
+
+  const durationMs = getAssetMeta(assetId)?.durationMs ?? null;
+  const path = useMemo(() => {
+    if (!peaks || peaks.length === 0) return null;
+    let slice = peaks;
+    if (durationMs && durationMs > 0) {
+      const n = peaks.length;
+      const a = Math.max(0, Math.floor((trimInMs / durationMs) * n));
+      const b = Math.min(n, Math.ceil((trimOutMs / durationMs) * n));
+      if (b > a) slice = peaks.slice(a, b);
+    }
+    return buildWavePath(slice);
+  }, [peaks, durationMs, trimInMs, trimOutMs]);
+
+  if (!path) {
+    return (
+      <svg className="h-full w-full" preserveAspectRatio="none" viewBox="0 0 100 20" aria-hidden="true">
+        <line x1="0" y1="10" x2="100" y2="10" stroke="var(--vf-track-audio-waveform)" strokeWidth="0.4" opacity="0.5" />
+      </svg>
+    );
+  }
+  return (
+    <svg className="h-full w-full" preserveAspectRatio="none" viewBox="0 0 100 20" aria-hidden="true">
+      <path d={path} fill="none" stroke="var(--vf-track-audio-waveform)" strokeWidth="0.6" />
+    </svg>
+  );
 }
 
-// Deterministic faux waveform path (MVP-STUB: real peaks come from the analysis job).
-function fauxWaveform(): string {
+/** Build a 0..100 × 0..20 mirrored waveform path from normalised (0..1) peaks. */
+function buildWavePath(peaks: number[]): string {
+  const N = 100;
   let d = "M 0 10";
-  for (let x = 0; x <= 100; x += 2) {
-    const amp = 2 + 7 * Math.abs(Math.sin(x * 0.6) * Math.cos(x * 0.21));
-    d += ` L ${x} ${10 - amp} L ${x} ${10 + amp}`;
+  for (let i = 0; i <= N; i++) {
+    const idx = Math.min(peaks.length - 1, Math.floor((i / N) * peaks.length));
+    const amp = Math.max(0.4, Math.min(1, peaks[idx] ?? 0)) * 9;
+    d += ` L ${i} ${10 - amp} L ${i} ${10 + amp}`;
   }
   return d;
 }

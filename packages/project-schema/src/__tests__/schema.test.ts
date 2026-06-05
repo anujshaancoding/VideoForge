@@ -120,8 +120,44 @@ describe("invariant enforcement", () => {
   });
 });
 
+describe("M4 creative-layer clip fields (regression: must NOT 422)", () => {
+  // The editor writes colorGrade / kenBurns / keyframe-id the instant a user touches
+  // an M4 feature. These previously failed the strict schema → autosave 422 + export
+  // rejection. This locks them in as valid.
+  function firstVideoClip(p: Project): Clip {
+    const t = p.tracks.find((tr) => tr.type === "video");
+    return expectDefined(clipsOf(t)[0], "first video clip");
+  }
+
+  it("accepts a per-clip colorGrade", () => {
+    const ok = clone(sampleProject);
+    firstVideoClip(ok).colorGrade = { brightness: 10, contrast: -5, saturation: 20 };
+    expect(validateProject(ok).ok).toBe(true);
+  });
+
+  it("accepts a kenBurns pan-zoom", () => {
+    const ok = clone(sampleProject);
+    firstVideoClip(ok).kenBurns = { startScale: 1.0, endScale: 1.4 };
+    expect(validateProject(ok).ok).toBe(true);
+  });
+
+  it("accepts keyframes carrying a UUID id", () => {
+    const ok = clone(sampleProject);
+    firstVideoClip(ok).keyframes["opacity"] = [
+      { id: "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d", timeMs: 0, value: 100, easing: "linear" },
+    ];
+    expect(validateProject(ok).ok).toBe(true);
+  });
+
+  it("still rejects an out-of-range colorGrade value", () => {
+    const bad = clone(sampleProject);
+    firstVideoClip(bad).colorGrade = { brightness: 999, contrast: 0, saturation: 0 };
+    expect(validateProject(bad).ok).toBe(false);
+  });
+});
+
 describe("newProject", () => {
-  it("produces a valid empty project", () => {
+  it("produces a valid project seeded with one empty video track", () => {
     const p = newProject({
       title: "My Reel",
       canvasWidth: 1080,
@@ -132,7 +168,10 @@ describe("newProject", () => {
     expect(p.schemaVersion).toBe(CURRENT_SCHEMA_VERSION);
     expect(p.revision).toBe(1);
     expect(p.canvas.aspectRatio).toBe("9:16");
-    expect(p.tracks).toEqual([]);
+    // A fresh project ships with a single empty video lane so there is somewhere to
+    // drop the first clip (an editor with zero tracks reads as broken).
+    expect(p.tracks).toHaveLength(1);
+    expect(p.tracks[0]).toMatchObject({ type: "video", clips: [] });
     expect(p.captionTracks).toEqual([]);
   });
 
@@ -185,5 +224,31 @@ describe("timecode helpers", () => {
   it("throws on malformed timecode", () => {
     expect(() => timecodeToMs("abc", 30)).toThrow();
     expect(() => timecodeToMs("1:2:3:4:5", 30)).toThrow();
+  });
+});
+
+describe("Clip.transform (on-canvas PiP)", () => {
+  it("accepts a valid transform on a media clip", () => {
+    const p = clone(sampleProject);
+    const vt = p.tracks.find((t) => t.type === "video");
+    expectDefined(clipsOf(vt)[0], "video clip[0]").transform = {
+      x: 25,
+      y: 25,
+      width: 50,
+      height: 50,
+    };
+    expect(validateProject(p).ok).toBe(true);
+  });
+
+  it("rejects a transform with non-positive width", () => {
+    const p = clone(sampleProject);
+    const vt = p.tracks.find((t) => t.type === "video");
+    expectDefined(clipsOf(vt)[0], "video clip[0]").transform = {
+      x: 0,
+      y: 0,
+      width: 0,
+      height: 50,
+    };
+    expect(validateProject(p).ok).toBe(false);
   });
 });

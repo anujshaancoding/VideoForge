@@ -1,5 +1,12 @@
 // WebSocket client — connects to the API's /ws endpoint and dispatches
 // asset:ready and export:progress events to registered handlers.
+//
+// Auth (Wave 2): the hub now authenticates the socket with the access JWT as a
+// `?token=` query param (the old `?workspaceId=` is gone). We read the token from
+// lib/api.ts memory at connect time so a token rotated by a refresh is picked up on
+// the next (re)connect.
+
+import { getAccessToken } from './api.js';
 
 const WS_URL = (import.meta.env.VITE_WS_URL as string | undefined) ?? 'ws://localhost:4000/ws';
 
@@ -11,15 +18,17 @@ class WsClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private shouldConnect = false;
 
-  connect(workspaceId = 'dev-workspace'): void {
+  connect(): void {
     this.shouldConnect = true;
-    this._connect(workspaceId);
+    this._connect();
   }
 
-  private _connect(workspaceId: string): void {
+  private _connect(): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
     try {
-      this.ws = new WebSocket(`${WS_URL}?workspaceId=${encodeURIComponent(workspaceId)}`);
+      const token = getAccessToken();
+      const qs = token ? `?token=${encodeURIComponent(token)}` : '';
+      this.ws = new WebSocket(`${WS_URL}${qs}`);
       this.ws.addEventListener('message', (e) => {
         try {
           const payload = JSON.parse(e.data as string) as Record<string, unknown>;
@@ -29,7 +38,7 @@ class WsClient {
       });
       this.ws.addEventListener('close', () => {
         if (this.shouldConnect) {
-          this.reconnectTimer = setTimeout(() => this._connect(workspaceId), 3000);
+          this.reconnectTimer = setTimeout(() => this._connect(), 3000);
         }
       });
       this.ws.addEventListener('error', () => {

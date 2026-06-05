@@ -14,9 +14,25 @@ import {
   apiPatchProject,
   apiDeleteProject,
   apiDuplicateProject,
+  ApiError,
 } from './api.js';
 
 const LS_KEY = 'videoforge.projects.v1';
+
+/**
+ * Decide whether a thrown API error is a *genuine offline* condition (so the
+ * localStorage fallback is the right, intended behaviour) or a *server-reachable*
+ * failure such as 401/403/404/409/5xx (so falling back to local — possibly the
+ * seeded sampleProject — would MASK the real server document and then let autosave
+ * overwrite it with stale data).
+ *
+ * The api client throws `ApiError` for any non-2xx response (server reachable) and a
+ * native `TypeError` ("Failed to fetch") when the network itself is down. So: only a
+ * non-ApiError (network) failure is treated as offline.
+ */
+function isOfflineError(err: unknown): boolean {
+  return !(err instanceof ApiError);
+}
 
 // ── localStorage fallback helpers ─────────────────────────────────────────────
 
@@ -63,6 +79,13 @@ export interface CreateProjectInput {
   width: number;
   height: number;
   frameRate?: number;
+  /**
+   * Optional pre-built project document (create-from-template). When present it is
+   * persisted as-is via POST /projects (Core honours a supplied `document`); when
+   * absent a fresh blank project is seeded. The caller owns/stamps the document's
+   * identity (see cloneTemplateToProject) — we don't mutate it here.
+   */
+  document?: Project;
 }
 
 // ── API-backed functions ───────────────────────────────────────────────────────
@@ -104,22 +127,36 @@ export async function getProject(id: string): Promise<Project | null> {
   try {
     const p = await apiGetProject(id);
     return p.document as Project;
-  } catch {
-    return lsEnsureSeeded(lsReadAll())[id] ?? null;
+  } catch (err) {
+    // Server reachable but the request failed (401 auth race, 5xx, …): do NOT fall
+    // back to the (possibly seeded) localStorage doc — that would mask the real
+    // saved project and let autosave clobber it. Rethrow so the caller can
+    // surface an error / retry instead of silently loading stale state.
+    if (!isOfflineError(err)) throw err;
+    // Genuinely offline → the local copy is the right fallback. Don't seed a
+    // sample here: a missing id offline should read as "not found", not as the
+    // sample project masquerading under the requested id.
+    return lsReadAll()[id] ?? null;
   }
 }
 
 export async function createProject(input: CreateProjectInput): Promise<Project> {
-  const project = schemaNewProject({
-    title: input.title.trim() || 'Untitled project',
-    canvasWidth: input.width,
-    canvasHeight: input.height,
-    frameRate: input.frameRate ?? 30,
-  });
+  // Create-from-template supplies a fully-formed, identity-stamped document; the
+  // blank flow seeds one. Either way the document is what we persist + return.
+  const project =
+    input.document ??
+    schemaNewProject({
+      title: input.title.trim() || 'Untitled project',
+      canvasWidth: input.width,
+      canvasHeight: input.height,
+      frameRate: input.frameRate ?? 30,
+    });
   try {
     await apiCreateProject({ name: project.title, document: project });
   } catch {
-    // Fallback: persist locally
+    // Fallback: persist locally (also covers the in-flight Core POST-document change —
+    // until it lands, the document round-trips via localStorage so the editor opens
+    // pre-filled in dev). Server-reachable failures still create via the seed path.
     const map = lsReadAll();
     map[project.id] = project;
     lsWriteAll(map);
@@ -127,12 +164,28 @@ export async function createProject(input: CreateProjectInput): Promise<Project>
   return project;
 }
 
-export async function saveProject(project: Project, baseRevision: number): Promise<Project> {
+export async function saveProject(
+  project: Project,
+  baseRevision: number,
+  opts?: { keepalive?: boolean },
+): Promise<Project> {
   try {
-    const updated = await apiPatchProject(project.id, { document: project, baseRevision });
+    const updated = await apiPatchProject(
+      project.id,
+      { document: project, baseRevision },
+      opts,
+    );
+    // Mirror the successful save locally too, so an immediately-following offline
+    // reload still sees the latest doc rather than a stale local copy.
+    const map = lsReadAll();
+    map[project.id] = { ...project, revision: updated.revision } as Project;
+    lsWriteAll(map);
     return { ...project, revision: updated.revision } as Project;
-  } catch {
-    // Fallback: persist locally
+  } catch (err) {
+    // Only persist locally when genuinely offline. On a server-reachable failure
+    // (401/409/5xx) rethrow so autosave surfaces 'error' and retries — silently
+    // "succeeding" into localStorage would hide a real save failure.
+    if (!isOfflineError(err)) throw err;
     const map = lsReadAll();
     map[project.id] = project;
     lsWriteAll(map);

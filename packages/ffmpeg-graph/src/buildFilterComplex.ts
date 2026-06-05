@@ -22,9 +22,19 @@
 // MVP-STUB note: real export pre-rasterises gradient/blur text, Lottie/SVG/stickers
 // to RGBA PNG sequences and composites them via `overlay` (§10.3). The MVP graph
 // honestly omits those overlay inputs and emits clearly-marked comments instead of
-// inventing input files this pure builder cannot produce. Solid `drawtext`-able text
-// and image overlays are also out of the M0 spine here (the editor-shell CanvasStage
-// renders them in preview). Captions are the proven text→export parity surface (§22.3).
+// inventing input files this pure builder cannot produce. IMAGE/shape/lottie/sticker
+// overlays remain out of the M0 spine here (the editor-shell CanvasStage renders them
+// in preview). Captions are the proven text→export parity surface (§22.3).
+//
+// TEXT OVERLAYS are now rendered into the export via a `drawtext` stage (§10 of
+// Text_Overlay_Export_Spec.md): each `kind:"text"` overlay burns in with the SAME
+// Inter font, geometry, size (incl. the 12px floor), outline, opacity and timing the
+// preview canvas draws — geometry/size come from the SHARED `layoutTextOverlay` helper
+// in `@videoforge/project-schema` (the same function the preview calls), so the two
+// sides cannot drift. `style.fontFamily` is intentionally IGNORED: the canvas hardcodes
+// Inter, and parity demands the export do the same (R1). Deferred sub-features
+// (gradient/shadow/letterSpacing/backgroundColor/rotation/animation) are honestly
+// omitted, matching what the canvas omits today (§9).
 // ─────────────────────────────────────────────────────────────────────────────
 
 import type {
@@ -35,9 +45,12 @@ import type {
   VoiceOverTrack,
   Clip,
   CaptionTrack,
+  OverlayTrack,
+  TextOverlay,
   Transition,
   Effect,
 } from "@videoforge/project-schema";
+import { layoutTextOverlay, weightToInterFile } from "@videoforge/project-schema";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public types
@@ -82,6 +95,40 @@ export interface InputSpec {
   path: string;
 }
 
+/**
+ * A per-overlay text file the worker must materialise before spawning FFmpeg. The
+ * builder stays pure (no fs), so it emits the line-split `text` plus a sentinel
+ * `token` it embedded in `filterComplex` at the overlay's `textfile=` option. The
+ * worker writes `text` to a temp file (mirroring the SRT write) and string-replaces
+ * `token` in `filterComplex` with the real temp-file path. Using `textfile=` (not
+ * inline `text=`) means the user's text NEVER passes through the filtergraph
+ * tokeniser — only the worker-controlled filename does — neutralising the entire
+ * `:` `'` `%` `\` / newline escaping class (spec §7.1 / R3), exactly as the
+ * `subtitles=` caption path is already trusted.
+ */
+export interface TextFileSpec {
+  /** Sentinel string embedded in `filterComplex`; the worker swaps it for the temp path. */
+  token: string;
+  /** The overlay id this text belongs to (used by the worker to name the temp file). */
+  overlayId: string;
+  /** The overlay text, already split/normalised to real newlines (one drawtext block). */
+  text: string;
+}
+
+/**
+ * A font file reference the worker resolves against `INTER_FONT_DIR`. The builder
+ * emits a sentinel `token` at the overlay's `fontfile=` option and records the bundled
+ * Inter `file` basename (e.g. "Inter-SemiBold.ttf"); the worker string-replaces
+ * `token` in `filterComplex` with `${INTER_FONT_DIR}/${file}` (spec §4.3 / §7.3),
+ * keeping this builder free of any filesystem/path knowledge.
+ */
+export interface FontSpec {
+  /** Sentinel string embedded in `filterComplex`; the worker swaps it for the abs path. */
+  token: string;
+  /** Bundled Inter static-TTF basename, e.g. "Inter-SemiBold.ttf". */
+  file: string;
+}
+
 export interface BuildResult {
   /** Full argv (after the leading `ffmpeg`), deterministic and ready to spawn. */
   args: string[];
@@ -91,6 +138,16 @@ export interface BuildResult {
   inputs: InputSpec[];
   /** The final mapped video pad label (e.g. "[vout]"). */
   outputLabel: string;
+  /**
+   * Per-overlay text files the worker must write + substitute into `filterComplex`
+   * (text-overlay drawtext stage, §10.3). Empty when there are no text overlays.
+   */
+  textFiles: TextFileSpec[];
+  /**
+   * Inter font references the worker must resolve against `INTER_FONT_DIR` and
+   * substitute into `filterComplex` (§4.3). Deduped; empty when no text overlays.
+   */
+  fonts: FontSpec[];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -128,7 +185,7 @@ function colorGradeOf(clip: Clip): Effect | undefined {
  * The direct field takes precedence over the legacy `effects` array.
  */
 function colorGradeExtOf(clip: Clip): string | null {
-  const ext = (clip as unknown as { colorGrade?: { brightness?: number; contrast?: number; saturation?: number } }).colorGrade;
+  const ext = clip.colorGrade;
   if (!ext) return null;
   const { brightness = 0, contrast = 0, saturation = 0 } = ext;
   const b = Math.max(-1, Math.min(1, brightness / 100)).toFixed(3);
@@ -138,11 +195,34 @@ function colorGradeExtOf(clip: Clip): string | null {
 }
 
 /**
+ * Per-clip PiP box in OUTPUT pixels, or null when the clip fills the frame (no
+ * transform). `transform` is percent-of-canvas (x/y top-left, width/height size).
+ * Dimensions are forced even (libx264/yuv420p) and the position is clamped to ints.
+ * This is the export half of the preview↔export transform parity (PreviewEngine
+ * draws the same box) — "what you cut is what you get" for moved/resized clips.
+ */
+function clipBox(
+  clip: Clip,
+  outW: number,
+  outH: number,
+): { w: number; h: number; x: number; y: number } | null {
+  const t = clip.transform;
+  if (!t) return null;
+  const even = (n: number) => Math.max(2, Math.round(n / 2) * 2);
+  return {
+    w: even((t.width / 100) * outW),
+    h: even((t.height / 100) * outH),
+    x: Math.round((t.x / 100) * outW),
+    y: Math.round((t.y / 100) * outH),
+  };
+}
+
+/**
  * M4: Read the `kenBurns` extension field and emit a `zoompan` filter string,
  * or return null if absent. Uses a slow linear zoom from startScale to endScale.
  */
 function kenBurnsFilterOf(clip: Clip, outW: number, outH: number, fps: number): string | null {
-  const ext = (clip as unknown as { kenBurns?: { startScale: number; endScale: number } }).kenBurns;
+  const ext = clip.kenBurns;
   if (!ext) return null;
   const { startScale, endScale } = ext;
   const clipDurationMs = clip.endOnTimeline - clip.startOnTimeline;
@@ -192,6 +272,59 @@ function gainMul(percent: number): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Output-duration bound — the catastrophic-runaway fix.
+//
+// The composite base is a SYNTHETIC `color=` lavfi source (§3 below). FFmpeg's
+// `color` generates frames FOREVER unless given a `:d=` duration, and `overlay`
+// follows its (infinite) main input — so with an empty/short timeline the encode
+// never terminates (the dev-worker incident: empty track + watermark → ∞ render).
+// We bound the export DETERMINISTICALLY from the project itself: the timeline
+// length = the furthest point any clip / overlay / caption reaches. This is the
+// SAME extent the client preview's playhead spans, so capping here UPHOLDS the
+// WYCIWYG invariant (the MP4 is exactly as long as the timeline you previewed),
+// it does not alter it. The bound is applied in TWO places (§3 base `:d=` + the
+// `-t` output cap in §7) so neither a future graph change nor a stray infinite
+// input can reintroduce an unbounded encode.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Empty-timeline export duration (ms). A project with NO clips, overlays, or
+ * captions has zero intrinsic length; rather than emit an unbounded (or zero-frame
+ * degenerate) command we produce a short, deterministic, BOUNDED canvas-only clip.
+ * 1000ms matches the render-worker's existing `|| 1` (1-second) zero-duration
+ * fallback (apps/render-worker/src/worker.ts `projectDurationSeconds`), so the
+ * graph and the worker agree on the same minimal length.
+ */
+export const EMPTY_PROJECT_DURATION_MS = 1000;
+
+/**
+ * Total project/timeline duration in integer ms: the maximum `endOnTimeline` across
+ * EVERY media + overlay clip plus the maximum caption `endMs`. This is the furthest
+ * point the timeline reaches — identical to the preview playhead extent (parity) —
+ * and therefore the deterministic length the export must be bounded to. Falls back to
+ * {@link EMPTY_PROJECT_DURATION_MS} for an empty timeline (no clips/overlays/captions).
+ * Pure: no I/O, no clock; same Project ⇒ same number.
+ */
+export function projectDurationMs(project: Project): number {
+  let maxMs = 0;
+  for (const track of project.tracks) {
+    // The Track union includes CaptionTrack (no `clips`); video/audio/voiceover/overlay
+    // all carry `clips[]` whose entries expose `endOnTimeline` (Clip and OverlayClip alike).
+    if (!("clips" in track)) continue;
+    for (const clip of track.clips as Array<{ endOnTimeline: number }>) {
+      if (clip.endOnTimeline > maxMs) maxMs = clip.endOnTimeline;
+    }
+  }
+  // Captions may also live in the dedicated captionTracks array; both extend the timeline.
+  for (const ct of project.captionTracks) {
+    for (const b of ct.blocks) {
+      if (b.endMs > maxMs) maxMs = b.endMs;
+    }
+  }
+  return maxMs > 0 ? maxMs : EMPTY_PROJECT_DURATION_MS;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Caption serialisation (for the burned-in subtitles input) — deterministic ASS-free
 // SRT, since SRT round-trips through `subtitles` and the sidecar export alike.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -222,6 +355,141 @@ export function captionsToSrt(track: CaptionTrack): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Text-overlay drawtext stage (Text_Overlay_Export_Spec.md §10). Burns each
+// `kind:"text"` overlay into the video between the captions burn and the watermark,
+// reproducing the preview canvas exactly: SHARED `layoutTextOverlay` geometry/size,
+// Inter (ignoring `style.fontFamily`, R1), `textfile=` for escape-safe text (R3),
+// outline + opacity from the canvas, and `enable=between(t,start,end)` timing.
+// Pure — emits sentinel tokens for the worker to substitute (no fs here).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** drawtext per-line horizontal alignment letter from the overlay `align` (§6.3). */
+function textAlignLetter(align: "left" | "center" | "right"): "L" | "C" | "R" {
+  return align === "left" ? "L" : align === "right" ? "R" : "C";
+}
+
+/** `style.color` (#RRGGBB[AA]) → { hex: "RRGGBB", alpha: 0..1 } for drawtext fontcolor. */
+function parseHexColor(color: string): { hex: string; alpha: number } {
+  const c = color.replace(/^#/, "");
+  const rgb = c.slice(0, 6).toUpperCase();
+  // 8-digit hex carries an alpha byte; split it out (drawtext: 0xRRGGBB@<a∈[0,1]>).
+  const alpha = c.length >= 8 ? Number.parseInt(c.slice(6, 8), 16) / 255 : 1;
+  return { hex: rgb.padEnd(6, "0"), alpha };
+}
+
+/** Format an alpha 0..1 as a stable, minimal decimal string for `@<a>`. */
+function alphaStr(a: number): string {
+  const clamped = Math.max(0, Math.min(1, a));
+  return clamped.toFixed(4).replace(/\.?0+$/, "") || "0";
+}
+
+/**
+ * Result of building the text-overlay stage: the chained filter parts (each
+ * `[in]drawtext=...[out]`), the final output label, and the aux files/fonts the
+ * worker must materialise/resolve and substitute into the graph.
+ */
+interface DrawtextStage {
+  parts: string[];
+  outLabel: string;
+  textFiles: TextFileSpec[];
+  fonts: FontSpec[];
+}
+
+/**
+ * Build the drawtext chain for every `kind:"text"` overlay, threading `inLabel`
+ * through one drawtext per overlay and returning the new output label. Z-order =
+ * track array order then clip order, matching the preview's `_drawOverlays` loop.
+ *
+ * @param project   the §18 project (overlay tracks + canvas.height for fontSize ref).
+ * @param inLabel   the video pad to draw on (post-captions, pre-watermark): "vsub"/base.
+ * @param Rw,Rh     export render resolution (the surface the overlays are laid out on).
+ */
+function buildTextOverlayStage(
+  project: Project,
+  inLabel: string,
+  Rw: number,
+  Rh: number,
+): DrawtextStage {
+  const parts: string[] = [];
+  const textFiles: TextFileSpec[] = [];
+  const fontsByFile = new Map<string, FontSpec>(); // dedupe identical Inter faces
+  const Ch = project.canvas.height;
+
+  const overlayTracks = project.tracks.filter((t): t is OverlayTrack => t.type === "overlay");
+
+  let current = inLabel;
+  let n = 0;
+  for (const track of overlayTracks) {
+    for (const ov of track.clips) {
+      if (ov.kind !== "text") continue; // image/shape/lottie/sticker stay out of scope (§9)
+      const textOv = ov as TextOverlay;
+
+      // Geometry + size from the SHARED helper (identical to the preview's call) — the
+      // single mechanism that keeps export and preview from drifting (§5/§7.5).
+      const L = layoutTextOverlay(textOv, Rw, Rh, Ch);
+
+      // Font: weight (+ italic) → bundled Inter face (R2). Emit a sentinel token the
+      // worker resolves to `${INTER_FONT_DIR}/<file>`; dedupe shared faces.
+      const fontFile = weightToInterFile(textOv.style.fontWeight, textOv.style.italic ?? false);
+      let font = fontsByFile.get(fontFile);
+      if (!font) {
+        font = { token: `__VF_FONT_${fontFile}__`, file: fontFile };
+        fontsByFile.set(fontFile, font);
+      }
+
+      // Text: written VERBATIM to the textfile (worker materialises it). Embedded "\n"
+      // are real newlines in the file → drawtext renders the multi-line block (§6.3). No
+      // escaping/trimming here — the preview uses the identical `text.split("\n")` rule, so
+      // the two sides' line boxes coincide; `textfile=` keeps the content out of the
+      // filtergraph tokeniser entirely (R3).
+      const textToken = `__VF_OVERLAYTEXT_${textOv.id}__`;
+      textFiles.push({ token: textToken, overlayId: textOv.id, text: textOv.text });
+
+      // Colour + opacity: fontcolor alpha = whole-overlay opacity × the colour's own
+      // alpha; the SAME product goes on the outline (`bordercolor`), reproducing the
+      // canvas `globalAlpha` which scales both stroke and fill (§7.2).
+      const { hex, alpha: colorAlpha } = parseHexColor(textOv.style.color || "#FFFFFF");
+      const a = alphaStr((textOv.opacity / 100) * colorAlpha);
+
+      // Horizontal x-expression by align (§5.3): anchor − text_w fraction. Vertical y
+      // always centres the (possibly multi-line) block on the box mid-line via text_h.
+      const xExpr =
+        textOv.style.align === "left"
+          ? `${L.boxX}`
+          : textOv.style.align === "right"
+            ? `${L.boxX}+${L.boxW}-text_w`
+            : `${L.boxX}+${L.boxW}/2-text_w/2`;
+      const yExpr = `${L.boxY}+${L.boxH}/2-text_h/2`;
+
+      // Outline: drawtext `borderw` (outset) reproduces the canvas centre-stroke within
+      // the golden tolerance (R4); same alpha as the fill. Omit when there is none.
+      const outline = textOv.style.outline;
+      const borderOpts =
+        L.borderPx > 0 && outline
+          ? `:borderw=${L.borderPx}:bordercolor=0x${parseHexColor(outline.color).hex}@${a}`
+          : "";
+
+      const startSec = msToSec(textOv.startOnTimeline);
+      const endSec = msToSec(textOv.endOnTimeline);
+      const out = `vtext${n}`;
+
+      // `expansion=none` so any `%{...}` in user text renders literally (R3). `textfile`
+      // keeps content out of the tokeniser; only the worker-controlled token is inline.
+      parts.push(
+        `[${current}]drawtext=fontfile=${font.token}:textfile=${textToken}:fontsize=${L.fontPx}:` +
+          `fontcolor=0x${hex}@${a}:x='${xExpr}':y='${yExpr}'${borderOpts}:` +
+          `line_spacing=${L.lineSpacing}:text_align=${textAlignLetter(textOv.style.align)}:` +
+          `expansion=none:enable='between(t,${startSec},${endSec})'[${out}]`,
+      );
+      current = out;
+      n += 1;
+    }
+  }
+
+  return { parts, outLabel: current, textFiles, fonts: [...fontsByFile.values()] };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // The builder
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -238,6 +506,11 @@ export function buildExportCommand(project: Project, settings: ExportSettings): 
   const { resolution, fps, crf } = settings;
   const outW = resolution.w;
   const outH = resolution.h;
+
+  // Deterministic output bound (the runaway-export fix). Derived from the SAME
+  // timeline the preview spans, so it caps length without breaking WYCIWYG.
+  const durationMs = projectDurationMs(project);
+  const durationSec = msToSec(durationMs);
 
   const inputs: InputSpec[] = [];
   const filterParts: string[] = [];
@@ -303,19 +576,31 @@ export function buildExportCommand(project: Project, settings: ExportSettings): 
         if (grade) steps.push(eqFromColorGrade(grade.params));
       }
 
+      // 2b1. Mirror (hflip/vflip) — applied before scale so the box geometry is
+      //      unaffected. Preview applies the same mirror, keeping export parity.
+      if (clip.flipH) steps.push("hflip");
+      if (clip.flipV) steps.push("vflip");
+
       // 2b2. Ken Burns zoom-pan (M4). Applied after color grade, before scale/pad.
       //      zoompan outputs frames at the target resolution so scale/pad is a no-op.
       const kbFilter = kenBurnsFilterOf(clip, outW, outH, fps);
       if (kbFilter) steps.push(kbFilter);
 
-      // 2c. Scale + pad to the output canvas (§10.2). force_original_aspect_ratio so
-      //     letter/pillar-boxing matches the preview's fit; pad fills with canvas bg.
+      // 2c. Scale to the output canvas, OR to the clip's PiP box if it has a transform.
+      //     No transform → fill the frame (aspect-fit + pad) EXACTLY as before, so
+      //     existing projects export byte-identically. A transformed clip scales to its
+      //     box (positioned by the overlay step §3 at the box's top-left).
       const bg = project.canvas.backgroundColor.replace("#", "0x");
-      steps.push(
-        `scale=${outW}:${outH}:force_original_aspect_ratio=decrease`,
-        `pad=${outW}:${outH}:(ow-iw)/2:(oh-ih)/2:color=${bg}`,
-        "setsar=1",
-      );
+      const box = clipBox(clip, outW, outH);
+      if (box) {
+        steps.push(`scale=${box.w}:${box.h}`, "setsar=1");
+      } else {
+        steps.push(
+          `scale=${outW}:${outH}:force_original_aspect_ratio=decrease`,
+          `pad=${outW}:${outH}:(ow-iw)/2:(oh-ih)/2:color=${bg}`,
+          "setsar=1",
+        );
+      }
 
       // 2d. Per-clip opacity (§10.3). opacity 100 = opaque; <100 needs an alpha plane
       //     so the overlay chain can blend it. format=rgba then scale the alpha.
@@ -338,15 +623,25 @@ export function buildExportCommand(project: Project, settings: ExportSettings): 
   // gaps (no clip covering an area/time) export as the canvas background (§A-13).
   let baseLabel = "base";
   // A solid canvas-colour base spanning the project. Deterministic synthetic source.
+  // `:d=<durationSec>` BOUNDS the source: a `color` lavfi without it generates frames
+  // forever and `overlay` follows it → an unbounded encode (the empty-timeline runaway
+  // incident). The duration is the timeline extent (projectDurationMs) so the base
+  // covers exactly what the preview spans — parity preserved, runaway impossible.
   filterParts.push(
-    `color=c=${project.canvas.backgroundColor.replace("#", "0x")}:s=${outW}x${outH}:r=${fps}[${baseLabel}]`,
+    `color=c=${project.canvas.backgroundColor.replace("#", "0x")}:s=${outW}x${outH}:r=${fps}:d=${durationSec}[${baseLabel}]`,
   );
 
-  const transitionsByTrack = (trackId: string): Transition[] =>
-    project.transitions
+  const transitionsByTrack = (trackId: string): Transition[] => {
+    const startOf = (clipId: string): number =>
+      videoTracks
+        .flatMap((vt) => vt.clips)
+        .find((c) => c.id === clipId)?.startOnTimeline ?? 0;
+    return project.transitions
       .filter((t) => t.trackId === trackId && t.type === "crossfade")
       .slice()
-      .sort((a, b) => a.durationMs - b.durationMs); // stable
+      // Order by the FROM clip's timeline position so chained transitions fuse in order.
+      .sort((a, b) => startOf(a.fromClipId) - startOf(b.fromClipId));
+  };
 
   let compositeCounter = 0;
   for (const vt of videoTracks) {
@@ -363,8 +658,8 @@ export function buildExportCommand(project: Project, settings: ExportSettings): 
       const fromClip = vt.clips.find((c) => c.id === tr.fromClipId);
       if (!fromClip) continue;
 
-      // xfade `offset` = when the crossfade begins on the FROM stream's local timeline:
-      // the overlap starts durationMs before the FROM clip ends (its timeline length).
+      // xfade `offset` = when the crossfade begins on the FROM stream's local (origin-0)
+      // timeline: the overlap starts durationMs before the FROM clip ends.
       const fromLenMs = fromClip.endOnTimeline - fromClip.startOnTimeline;
       const offsetMs = Math.max(0, fromLenMs - tr.durationMs);
       const out = `xf${compositeCounter++}`;
@@ -376,20 +671,40 @@ export function buildExportCommand(project: Project, settings: ExportSettings): 
       fusedLabel.set(tr.toClipId, out);
     }
 
-    // Overlay every distinct fused label for this track onto the running composite,
-    // positioned at the clip's timeline start (enable window via overlay `enable`).
-    const placed = new Set<string>();
+    // Group clips by their producing label (a transition fuses two clips into one).
+    // `x`/`y` are the overlay top-left in output px from the clip's PiP box (0,0 when
+    // it fills the frame). The first clip in a fused group sets the position.
+    const groups = new Map<string, { startMs: number; endMs: number; x: number; y: number }>();
     for (const clip of vt.clips) {
       const label = fusedLabel.get(clip.id)!;
-      if (placed.has(label)) continue;
-      placed.add(label);
-      const startSec = msToSec(clip.startOnTimeline);
-      const endSec = msToSec(clip.endOnTimeline);
+      const g = groups.get(label);
+      const box = clipBox(clip, outW, outH);
+      if (g) {
+        g.startMs = Math.min(g.startMs, clip.startOnTimeline);
+        g.endMs = Math.max(g.endMs, clip.endOnTimeline);
+      } else {
+        groups.set(label, {
+          startMs: clip.startOnTimeline,
+          endMs: clip.endOnTimeline,
+          x: box?.x ?? 0,
+          y: box?.y ?? 0,
+        });
+      }
+    }
+
+    // Overlay each group onto the running composite AT ITS TIMELINE POSITION. The clip
+    // stream is origin-0 (setpts in §2 / xfade output); we DELAY it to startOnTimeline
+    // with a PTS offset so the frames shown during the `enable` window are the correct
+    // ones — this is the load-bearing "what you cut is what you get" placement (finding #4).
+    // `enable` reveals the canvas base outside the window (gaps export as background, §A-13).
+    for (const [label, g] of groups) {
+      const startSec = msToSec(g.startMs);
+      const endSec = msToSec(g.endMs);
+      const placed = `pl${compositeCounter++}`;
       const next = `cmp${compositeCounter++}`;
-      // overlay onto the base; PTS shift so the clip appears at its timeline position,
-      // and `enable` clips the visible window so gaps reveal the canvas base (§A-13).
       filterParts.push(
-        `[${baseLabel}][${label}]overlay=0:0:enable='between(t,${startSec},${endSec})':eof_action=pass[${next}]`,
+        `[${label}]setpts=PTS-STARTPTS+${startSec}/TB[${placed}]`,
+        `[${baseLabel}][${placed}]overlay=${g.x}:${g.y}:enable='between(t,${startSec},${endSec})':eof_action=pass[${next}]`,
       );
       baseLabel = next;
     }
@@ -413,6 +728,15 @@ export function buildExportCommand(project: Project, settings: ExportSettings): 
     filterParts.push(`[${videoOut}]subtitles=subtitles\\:captions.srt[${next}]`);
     videoOut = next;
   }
+
+  // ── 4b. Text overlays via `drawtext` — ABOVE video+captions, BELOW the watermark
+  // (§10.1: the Free-tier watermark must always win). Each `kind:"text"` overlay burns
+  // in with the SHARED layout helper (so it matches the preview), Inter, escape-safe
+  // `textfile=`, and `enable=between(t,...)` timing. No-op (label unchanged) when there
+  // are no text overlays, so existing graphs/goldens are byte-identical.
+  const textStage = buildTextOverlayStage(project, videoOut, outW, outH);
+  for (const part of textStage.parts) filterParts.push(part);
+  videoOut = textStage.outLabel;
 
   // ── 5. Mandatory Free-tier branding watermark — final overlay (§10.2, §10.3) ─────
   // Bottom-right, ~10% canvas width, 70% opacity (§10.2). Synthetic input the worker
@@ -466,16 +790,19 @@ export function buildExportCommand(project: Project, settings: ExportSettings): 
       const g = clip.gain ?? 100;
       if (g !== 100) steps.push(`volume=${gainMul(g)}`);
 
-      // Per-clip linear fade in/out from the `gain` keyframes (afade, §7.1, §3.2).
-      // MVP honours a leading fade-in (value rises from 0) as `afade=t=in`.
-      const gainKfs = clip.keyframes["gain"];
-      if (gainKfs && gainKfs.length >= 2) {
-        const first = gainKfs[0]!;
-        const second = gainKfs[1]!;
-        if (typeof first.value === "number" && first.value === 0 && first.timeMs < second.timeMs) {
-          const dur = msToSec(second.timeMs - first.timeMs);
-          steps.push(`afade=t=in:st=0:d=${dur}`);
-        }
+      // Per-clip linear fade in/out (§7.1, §3.2) from the clip's fade fields. afade
+      // operates on the post-atempo local stream, whose duration is the trimmed span
+      // divided by speed. Fade-out starts `fadeOut` before that local end.
+      const speed = clip.speed > 0 ? clip.speed : 1;
+      const localDurSec = (clip.trimOut - clip.trimIn) / 1000 / speed;
+      const fadeInSec = (clip.fadeInMs ?? 0) / 1000;
+      const fadeOutSec = (clip.fadeOutMs ?? 0) / 1000;
+      if (fadeInSec > 0) {
+        steps.push(`afade=t=in:st=0:d=${msToSec(Math.round(Math.min(fadeInSec, localDurSec) * 1000))}`);
+      }
+      if (fadeOutSec > 0) {
+        const stSec = Math.max(0, localDurSec - fadeOutSec);
+        steps.push(`afade=t=out:st=${msToSec(Math.round(stSec * 1000))}:d=${msToSec(Math.round(fadeOutSec * 1000))}`);
       }
 
       // Resample to a common rate so amix has matching layouts (deterministic).
@@ -569,12 +896,26 @@ export function buildExportCommand(project: Project, settings: ExportSettings): 
     args.push("-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2");
   }
 
+  // Output-duration cap (the runaway-export fix, belt-and-suspenders with the base
+  // `:d=` above). `-t` is an OUTPUT option (placed before the output filename) that
+  // stops the encode at the timeline length even if some input were unbounded. Both
+  // bounds derive from the same projectDurationMs, so they agree and parity holds:
+  // the MP4 is exactly as long as the timeline the client previewed.
+  args.push("-t", durationSec);
+
   // Sidecar caption note: when captions === "sidecar" the worker writes captionsToSrt()
   // to a .srt next to the MP4 (§10.1 Advanced) — no graph change, so nothing here.
 
   args.push("-movflags", "+faststart", "out.mp4");
 
-  return { args, filterComplex, inputs, outputLabel };
+  return {
+    args,
+    filterComplex,
+    inputs,
+    outputLabel,
+    textFiles: textStage.textFiles,
+    fonts: textStage.fonts,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

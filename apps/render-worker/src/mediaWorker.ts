@@ -9,7 +9,7 @@
 import { Worker, type Job, type ConnectionOptions } from 'bullmq';
 import { Redis, type RedisOptions } from 'ioredis';
 import { spawn } from 'node:child_process';
-import { writeFile } from 'node:fs/promises';
+import { writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -197,17 +197,43 @@ async function probeMetadata(inputPath: string, assetId: string): Promise<ProbeM
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Generate a waveform peaks JSON.
- * MVP shortcut: returns 1000 random peaks normalised 0–1. This is acceptable
- * at the MVP stage since waveform display is purely informational.
- * A production implementation would use ffprobe astats to extract real peaks.
+ * Extract REAL waveform peaks from the media's audio (replaces the old random-noise
+ * stub). Decodes to mono 8 kHz s16le PCM via the pinned FFmpeg, then buckets the
+ * samples into `buckets` normalised (0–1) max-amplitude peaks. Returns the peaks JSON
+ * (`{ peaks, count, sampleRate }`) the timeline + scrub UI render. The temp PCM file
+ * is pushed to `tempFiles` for the caller's cleanup. Falls back to a flat array on
+ * failure (never blocks the asset from becoming READY).
  */
-function generateFakePeaks(count = 1000): string {
-  const peaks: number[] = [];
-  for (let i = 0; i < count; i++) {
-    peaks.push(Math.round(Math.random() * 1000) / 1000);
+async function extractWaveformPeaks(
+  inputPath: string,
+  assetId: string,
+  tempFiles: string[],
+  buckets = 1000,
+): Promise<string> {
+  const pcmPath = join(tmpdir(), `vf-pcm-${assetId}.raw`);
+  tempFiles.push(pcmPath);
+  try {
+    await runFfmpeg(
+      ['-y', '-hide_banner', '-nostdin', '-i', inputPath, '-vn', '-ac', '1', '-ar', '8000', '-f', 's16le', pcmPath],
+      `peaks:${assetId}`,
+    );
+    const buf = await readFile(pcmPath);
+    const samples = new Int16Array(buf.buffer, buf.byteOffset, Math.floor(buf.byteLength / 2));
+    const peaks: number[] = [];
+    const per = Math.max(1, Math.floor(samples.length / buckets));
+    for (let i = 0; i < samples.length; i += per) {
+      let max = 0;
+      for (let j = i; j < i + per && j < samples.length; j++) {
+        const a = Math.abs(samples[j]!);
+        if (a > max) max = a;
+      }
+      peaks.push(Math.round((max / 32768) * 1000) / 1000);
+    }
+    return JSON.stringify({ peaks, count: peaks.length, sampleRate: 8000 });
+  } catch {
+    // Decode failed (e.g. no audio stream) — emit a flat, honest baseline.
+    return JSON.stringify({ peaks: new Array(buckets).fill(0), count: buckets, sampleRate: 8000 });
   }
-  return JSON.stringify({ peaks, sampleRate: 44100 });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -250,7 +276,7 @@ export async function processMediaJob(job: Job<MediaJobData>): Promise<void> {
 
       const waveformPath = join(tmpdir(), `vf-waveform-${assetId}.json`);
       tempFiles.push(waveformPath);
-      await writeFile(waveformPath, generateFakePeaks());
+      await writeFile(waveformPath, await extractWaveformPeaks(inputPath, assetId, tempFiles));
       waveformKey = `${assetId}/waveform.json`;
       await uploadToS3(waveformPath, BUCKET_PROXIES, waveformKey, 'application/json');
     } else if (isImage) {
@@ -259,7 +285,7 @@ export async function processMediaJob(job: Job<MediaJobData>): Promise<void> {
       tempFiles.push(thumbPath);
       console.info(`[media-worker] ${assetId}: generating image thumbnail`);
       await runFfmpeg(
-        ['-y', '-hide_banner', '-nostdin', '-i', inputPath, '-vf', 'scale=160:90:force_original_aspect_ratio=decrease', '-frames:v', '1', thumbPath],
+        ['-y', '-hide_banner', '-nostdin', '-i', inputPath, '-vf', 'scale=160:90:force_original_aspect_ratio=decrease:force_divisible_by=2', '-frames:v', '1', thumbPath],
         `thumb:${assetId}`,
       );
       thumbnailKey = `${assetId}/thumb.jpg`;
@@ -273,7 +299,10 @@ export async function processMediaJob(job: Job<MediaJobData>): Promise<void> {
         [
           '-y', '-hide_banner', '-nostdin',
           '-i', inputPath,
-          '-vf', 'scale=1280:720:force_original_aspect_ratio=decrease',
+          // force_divisible_by=2 keeps both dimensions EVEN — libx264 (yuv420p)
+          // rejects odd width/height, which a portrait/odd-aspect source otherwise
+          // produces (e.g. 720x1280 → 405x720 → "width not divisible by 2").
+          '-vf', 'scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2',
           '-c:v', 'libx264', '-crf', '23', '-preset', 'fast',
           '-c:a', 'aac', '-b:a', '128k',
           proxyPath,
@@ -288,7 +317,7 @@ export async function processMediaJob(job: Job<MediaJobData>): Promise<void> {
       console.info(`[media-worker] ${assetId}: generating thumbnail`);
       // Seek 1s in (or clamp to start) for a representative frame, not a black intro.
       await runFfmpeg(
-        ['-y', '-hide_banner', '-nostdin', '-ss', '1', '-i', inputPath, '-vf', 'scale=160:90:force_original_aspect_ratio=decrease', '-frames:v', '1', thumb0],
+        ['-y', '-hide_banner', '-nostdin', '-ss', '1', '-i', inputPath, '-vf', 'scale=160:90:force_original_aspect_ratio=decrease:force_divisible_by=2', '-frames:v', '1', thumb0],
         `thumb:${assetId}`,
       );
       thumbnailKey = `${assetId}/thumb.jpg`;
@@ -296,7 +325,7 @@ export async function processMediaJob(job: Job<MediaJobData>): Promise<void> {
 
       const waveformPath = join(tmpdir(), `vf-waveform-${assetId}.json`);
       tempFiles.push(waveformPath);
-      await writeFile(waveformPath, generateFakePeaks());
+      await writeFile(waveformPath, await extractWaveformPeaks(inputPath, assetId, tempFiles));
       waveformKey = `${assetId}/waveform.json`;
       await uploadToS3(waveformPath, BUCKET_PROXIES, waveformKey, 'application/json');
     }

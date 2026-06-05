@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useEditorStore } from '../../store/editorStore.js';
+import { useAssetStore, getAssetMeta } from '../../store/assetStore.js';
 import { Button, cx } from '../ui/index.js';
 import type { Track, CaptionBlock } from '@videoforge/project-schema';
-import { apiPresign, apiConfirmUpload, apiGetAsset, apiPollAssetReady, fileHash, type AssetRecord } from '../../lib/api.js';
+import { apiPresign, apiUploadToS3, apiConfirmUpload, apiGetAsset, apiPollAssetReady, fileHash, type AssetRecord } from '../../lib/api.js';
 import { wsClient } from '../../lib/wsClient.js';
+import { readViewPrefs, writeViewPrefs } from '../../lib/viewPrefs.js';
 
 // MediaPanel — left rail (§7.A). Three-section rail: Media / Text / Captions.
 // "Import media" does the full real S3 upload flow (presign → PUT → confirm →
@@ -21,6 +23,10 @@ export interface MediaAsset {
   proxyUrl: string | null;
   thumbnailUrl: string | null;
   errorMsg?: string;
+  /** 0–100 byte-upload progress; set only while status === 'uploading'. */
+  progress?: number;
+  /** The source File, retained so a failed upload can be retried. */
+  file?: File;
 }
 
 const KIND_GLYPH: Record<MediaKind, string> = { video: '▣', audio: '♪', image: '🖼' };
@@ -70,15 +76,27 @@ function parseSrt(text: string): Array<{ id: string; startMs: number; endMs: num
 
 export default function MediaPanel() {
   const tracks = useEditorStore((s) => s.project.tracks);
-  const playheadMs = useEditorStore((s) => s.playheadMs);
+  // NOTE: do NOT subscribe to playheadMs here — this panel (asset grid + waveforms)
+  // would otherwise re-render ~20×/s during playback and on every scrub. The handlers
+  // read the live playhead from getState() on demand instead.
   const addClipFromAsset = useEditorStore((s) => s.addClipFromAsset);
+  const addTrack = useEditorStore((s) => s.addTrack);
   const select = useEditorStore((s) => s.select);
   const addTextOverlay = useEditorStore((s) => s.addTextOverlay);
   const importCaptions = useEditorStore((s) => s.importCaptions);
+  const registerFromRecord = useAssetStore((s) => s.registerFromRecord);
 
-  const [tab, setTab] = useState<TabKind>('media');
-  const [collapsed, setCollapsed] = useState(false);
+  // Seed the left-rail view prefs (active tab + collapsed) from localStorage so the
+  // workspace looks the same after a reload. These are UI-only; they never touch the
+  // project document.
+  const [tab, setTab] = useState<TabKind>(() => readViewPrefs().leftPanelTab ?? 'media');
+  const [collapsed, setCollapsed] = useState<boolean>(() => readViewPrefs().leftPanelCollapsed ?? false);
   const [assets, setAssets] = useState<MediaAsset[]>([]);
+
+  // Persist the left-rail view prefs whenever they change.
+  useEffect(() => {
+    writeViewPrefs({ leftPanelTab: tab, leftPanelCollapsed: collapsed });
+  }, [tab, collapsed]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const srtInputRef = useRef<HTMLInputElement>(null);
 
@@ -125,6 +143,7 @@ export default function MediaPanel() {
         // Optimistically flip to ready now; fetch the full record for URLs/duration.
         void apiGetAsset(assetId)
           .then((rec) => {
+            registerFromRecord(rec);
             updateAsset(assetId, {
               status: 'ready',
               duration: durationLabel(rec.durationMs),
@@ -139,7 +158,7 @@ export default function MediaPanel() {
       });
     });
     return off;
-  }, [updateAsset]);
+  }, [updateAsset, registerFromRecord]);
 
   const uploadFile = useCallback(
     async (file: File) => {
@@ -148,7 +167,7 @@ export default function MediaPanel() {
 
       setAssets((prev) => [
         ...prev,
-        { id: tempId, name: file.name, kind, duration: '?:??', status: 'uploading', proxyUrl: null, thumbnailUrl: null },
+        { id: tempId, name: file.name, kind, duration: '?:??', status: 'uploading', progress: 0, proxyUrl: null, thumbnailUrl: null, file },
       ]);
 
       try {
@@ -167,6 +186,7 @@ export default function MediaPanel() {
           // Duplicate — reuse existing asset
           updateAsset(tempId, { id: presign.existingAssetId, status: 'processing' });
           const ready = await apiPollAssetReady(presign.existingAssetId);
+          registerFromRecord(ready);
           updateAsset(presign.existingAssetId, {
             status: 'ready',
             duration: durationLabel(ready.durationMs),
@@ -181,15 +201,18 @@ export default function MediaPanel() {
         const assetId = presign.assetId!;
         updateAsset(tempId, { id: assetId });
 
-        // 3. PUT the file directly to S3
-        await fetch(presign.uploadUrl!, { method: 'PUT', body: file, headers: { 'Content-Type': file.type } });
+        // 3. PUT the file directly to S3, reporting real byte-upload progress
+        await apiUploadToS3(presign.uploadUrl!, file, (pct) => updateAsset(assetId, { progress: pct }));
 
-        // 4. Confirm upload → triggers BullMQ proxy/thumbnail/waveform jobs
+        // 4. Confirm upload → triggers BullMQ proxy/thumbnail/waveform jobs.
+        //    Server-side processing has no byte progress, so the card switches to
+        //    an indeterminate "Processing…" bar (independent of the progress value).
         await apiConfirmUpload(assetId);
         updateAsset(assetId, { status: 'processing' });
 
         // 5. Poll until READY (WebSocket would be faster, but polling works)
         const ready: AssetRecord = await apiPollAssetReady(assetId);
+        registerFromRecord(ready);
         updateAsset(assetId, {
           name: file.name,
           status: 'ready',
@@ -201,7 +224,7 @@ export default function MediaPanel() {
         updateAsset(tempId, { status: 'error', errorMsg: err instanceof Error ? err.message : String(err) });
       }
     },
-    [updateAsset],
+    [updateAsset, registerFromRecord],
   );
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -209,6 +232,30 @@ export default function MediaPanel() {
     e.target.value = '';
     await Promise.all(files.map(uploadFile));
   };
+
+  // Drag-and-drop import: accept media files dropped anywhere on the Media tab.
+  const [dragOver, setDragOver] = useState(false);
+  const handleMediaDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      setDragOver(false);
+      const files = Array.from(e.dataTransfer.files ?? []).filter(
+        (f) => f.type.startsWith('video/') || f.type.startsWith('audio/') || f.type.startsWith('image/'),
+      );
+      if (files.length) void Promise.all(files.map(uploadFile));
+    },
+    [uploadFile],
+  );
+
+  // Retry a failed upload using the retained File.
+  const retryUpload = useCallback(
+    (asset: MediaAsset) => {
+      if (!asset.file) return;
+      setAssets((prev) => prev.filter((a) => a.id !== asset.id));
+      void uploadFile(asset.file);
+    },
+    [uploadFile],
+  );
 
   const handleSrtChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -223,11 +270,38 @@ export default function MediaPanel() {
     }
   }, [importCaptions]);
 
+  // Text tab: drop a text overlay at the playhead. A fresh project (newProject)
+  // seeds only a video track — no overlay lane — so without this we'd silently
+  // no-op. Create the overlay lane on demand (mirrors handleAddToTimeline's
+  // "make the right lane if none exists" behaviour) so the very first overlay works.
+  const handleAddTextOverlay = (preset: 'Title' | 'Body' | 'Caption style'): void => {
+    let overlayTrack = tracks.find((t) => t.type === 'overlay');
+    if (!overlayTrack) {
+      addTrack('overlay');
+      overlayTrack = useEditorStore.getState().project.tracks.find((t) => t.type === 'overlay');
+    }
+    if (!overlayTrack) return;
+    addTextOverlay(preset, overlayTrack.id, useEditorStore.getState().playheadMs);
+  };
+
   const handleAddToTimeline = (asset: MediaAsset): void => {
     if (asset.status !== 'ready') return;
-    const track = defaultTrackFor(asset.kind, tracks);
+    let track = defaultTrackFor(asset.kind, tracks);
+    if (!track) {
+      // Empty project (or every track was deleted): create the right lane first so
+      // double-click / Enter "just works" instead of silently no-opping.
+      addTrack(asset.kind === 'audio' ? 'audio' : 'video');
+      track = defaultTrackFor(asset.kind, useEditorStore.getState().project.tracks);
+    }
     if (!track) return;
-    addClipFromAsset(asset.id, track.id, playheadMs);
+    const durationMs = getAssetMeta(asset.id)?.durationMs ?? undefined;
+    // Append AFTER the track's existing content so clips never overlap (the user
+    // wants to add "at the end"); if the playhead is already past the content,
+    // drop it there instead so a deliberate gap is honoured.
+    const clips = 'clips' in track ? track.clips : [];
+    const trackEnd = clips.reduce((max, c) => Math.max(max, c.endOnTimeline), 0);
+    const atMs = Math.max(useEditorStore.getState().playheadMs, trackEnd);
+    addClipFromAsset(asset.id, track.id, atMs, durationMs);
   };
 
   if (collapsed) {
@@ -274,7 +348,22 @@ export default function MediaPanel() {
       </div>
 
       {tab === 'media' && (
-        <div role="tabpanel" className="flex min-h-0 flex-1 flex-col">
+        <div
+          role="tabpanel"
+          className={cx(
+            'flex min-h-0 flex-1 flex-col',
+            dragOver && 'outline-2 -outline-offset-2 outline-dashed outline-vf-accent',
+          )}
+          onDragOver={(e) => {
+            if (e.dataTransfer.types.includes('Files')) {
+              e.preventDefault();
+              e.dataTransfer.dropEffect = 'copy';
+              setDragOver(true);
+            }
+          }}
+          onDragLeave={(e) => { if (e.currentTarget === e.target) setDragOver(false); }}
+          onDrop={handleMediaDrop}
+        >
           <div className="shrink-0 p-3">
             <Button
               variant="secondary"
@@ -285,68 +374,108 @@ export default function MediaPanel() {
             >
               Import media
             </Button>
+            <p className="mt-1 text-center text-2xs text-vf-text-tertiary">or drag &amp; drop files here</p>
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-2 gap-2.5">
               {allAssets.map((asset) => (
                 <button
                   key={asset.id}
                   type="button"
-                  disabled={asset.status !== 'ready'}
+                  disabled={asset.status !== 'ready' && asset.status !== 'error'}
                   draggable={asset.status === 'ready'}
                   onDragStart={(e) => {
                     e.dataTransfer.setData('application/x-vf-asset', asset.id);
                     e.dataTransfer.setData('application/x-vf-asset-kind', asset.kind);
                     e.dataTransfer.effectAllowed = 'copy';
                   }}
+                  onClick={() => { if (asset.status === 'error') retryUpload(asset); }}
                   onDoubleClick={() => handleAddToTimeline(asset)}
-                  onKeyDown={(e) => { if (e.key === 'Enter') handleAddToTimeline(asset); }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      if (asset.status === 'error') retryUpload(asset);
+                      else handleAddToTimeline(asset);
+                    }
+                  }}
                   data-testid="asset-card"
-                  title={asset.status === 'uploading' ? 'Uploading…' : asset.status === 'processing' ? 'Processing…' : asset.status === 'error' ? (asset.errorMsg ?? 'Upload failed') : asset.name}
+                  title={asset.status === 'uploading' ? 'Uploading…' : asset.status === 'processing' ? 'Processing…' : asset.status === 'error' ? `${asset.errorMsg ?? 'Upload failed'} — click to retry` : asset.name}
                   className={cx(
-                    'group flex flex-col overflow-hidden rounded-lg border text-left',
-                    asset.status === 'ready'
-                      ? 'border-vf-border-subtle bg-vf-surface-2 hover:border-vf-border-strong'
-                      : 'border-vf-border-subtle bg-vf-surface-2 opacity-60',
+                    'group flex flex-col overflow-hidden rounded-lg border bg-vf-surface-2 text-left transition-colors',
+                    asset.status === 'ready' && 'cursor-grab border-vf-border-subtle hover:border-vf-border-strong',
+                    asset.status === 'error' && 'cursor-pointer border-vf-danger-fg/40 hover:border-vf-danger-fg',
+                    (asset.status === 'uploading' || asset.status === 'processing') && 'cursor-default border-vf-border-subtle',
                   )}
                 >
                   <div className="relative flex aspect-video items-center justify-center overflow-hidden bg-vf-surface-3 text-vf-icon-muted">
-                    {asset.thumbnailUrl ? (
+                    {asset.status === 'uploading' ? (
+                      // Uploading: real byte-progress bar + percentage (no glyph behind it).
+                      <div className="flex w-full flex-col items-center justify-center gap-2 px-4">
+                        <span className="text-2xs font-medium text-vf-text-secondary vf-tnum">
+                          Uploading {asset.progress ?? 0}%
+                        </span>
+                        <div className="h-1.5 w-full overflow-hidden rounded-pill bg-vf-surface-sunken">
+                          <div
+                            className="h-full rounded-pill bg-vf-accent transition-[width] duration-200 ease-out"
+                            style={{ width: `${asset.progress ?? 0}%` }}
+                          />
+                        </div>
+                      </div>
+                    ) : asset.status === 'processing' ? (
+                      // Processing: a SPINNER (reads as "working", not an infinite bar).
+                      <div className="flex flex-col items-center justify-center gap-1.5">
+                        <span
+                          aria-hidden="true"
+                          className="h-5 w-5 animate-spin rounded-full border-2 border-vf-surface-sunken border-t-vf-accent"
+                        />
+                        <span className="text-2xs font-medium text-vf-text-secondary">Processing</span>
+                      </div>
+                    ) : asset.status === 'error' ? (
+                      <div className="flex flex-col items-center justify-center gap-0.5 text-vf-danger-fg" title={asset.errorMsg ?? 'Upload failed'}>
+                        <span aria-hidden="true" className="text-base">⚠</span>
+                        <span className="text-2xs font-medium">Failed</span>
+                        <span className="text-[10px] opacity-80">↻ Retry</span>
+                      </div>
+                    ) : asset.thumbnailUrl ? (
                       <img src={asset.thumbnailUrl} alt="" className="h-full w-full object-cover" />
                     ) : (
-                      <span aria-hidden="true" className="text-lg">{KIND_GLYPH[asset.kind]}</span>
+                      <span aria-hidden="true" className="text-3xl opacity-70">{KIND_GLYPH[asset.kind]}</span>
                     )}
-                    {(asset.status === 'uploading' || asset.status === 'processing') && (
-                      <div className="absolute inset-0 flex items-center justify-center bg-vf-overlay-scrim/70">
-                        <span className="text-2xs text-vf-text-secondary">
-                          {asset.status === 'uploading' ? 'Uploading…' : 'Processing…'}
-                        </span>
-                      </div>
+                    {asset.status === 'ready' && (
+                      <span className="absolute bottom-1 right-1 rounded-pill bg-vf-surface-sunken/90 px-1.5 py-0.5 text-2xs text-vf-text-secondary vf-tnum">
+                        {asset.duration}
+                      </span>
                     )}
-                    {asset.status === 'error' && (
-                      <div
-                        className="absolute inset-0 flex items-center justify-center bg-vf-danger-bg/70"
-                        title={asset.errorMsg ?? 'Upload failed'}
-                      >
-                        <span className="max-w-full truncate px-1 text-2xs font-medium text-vf-danger-fg">
-                          Error
-                        </span>
-                      </div>
-                    )}
-                    <span className="absolute bottom-1 right-1 rounded-pill bg-vf-surface-sunken/80 px-1 text-2xs text-vf-text-secondary vf-tnum">
-                      {asset.duration}
-                    </span>
                   </div>
-                  <div className="truncate px-2 py-1 text-2xs text-vf-text-secondary" title={asset.name}>
-                    {asset.name}
+                  <div className="flex items-center gap-1 px-2 py-1.5">
+                    <span aria-hidden="true" className="shrink-0 text-2xs text-vf-text-tertiary">{KIND_GLYPH[asset.kind]}</span>
+                    <span className="truncate text-xs text-vf-text-secondary" title={asset.name}>
+                      {asset.name}
+                    </span>
                   </div>
                 </button>
               ))}
             </div>
             {allAssets.length === 0 && (
-              <p className="mt-6 text-center text-2xs text-vf-text-tertiary">
-                Import media to get started.
-              </p>
+              // Editor first-open empty state (§6.3): a prominent dashed drop-zone — the
+              // brand's first call to action. Clicking it opens the same file picker as
+              // "Import media"; dropping a file is already handled by the tabpanel above
+              // (the dashed accent outline lights up via the shared `dragOver` state).
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                data-testid="media-empty-dropzone"
+                className={cx(
+                  'mt-2 flex w-full flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed px-4 py-10 text-center transition-colors',
+                  dragOver
+                    ? 'border-vf-accent bg-vf-accent-subtle'
+                    : 'border-vf-border-default hover:border-vf-border-strong hover:bg-vf-surface-2',
+                )}
+              >
+                <span aria-hidden="true" className="text-2xl text-vf-text-tertiary">⬆</span>
+                <span className="text-sm font-medium text-vf-text-primary">Drop a video here</span>
+                <span className="text-2xs text-vf-text-tertiary">or click Import media above</span>
+                <span className="text-2xs text-vf-text-tertiary">MP4 · MOV · MKV · MP3 · WAV</span>
+              </button>
             )}
           </div>
         </div>
@@ -359,12 +488,7 @@ export default function MediaPanel() {
             <button
               key={preset}
               type="button"
-              onClick={() => {
-                const overlayTrack = tracks.find((t) => t.type === 'overlay');
-                if (overlayTrack) {
-                  addTextOverlay(preset, overlayTrack.id, playheadMs);
-                }
-              }}
+              onClick={() => handleAddTextOverlay(preset)}
               className="flex items-center gap-2 rounded-md border border-vf-border-subtle bg-vf-surface-2 px-3 py-2 text-left text-sm text-vf-text-primary hover:bg-vf-surface-3"
             >
               <span aria-hidden="true" className="text-vf-text-tertiary">T</span>

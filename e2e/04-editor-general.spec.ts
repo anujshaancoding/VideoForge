@@ -15,6 +15,23 @@ async function openEditor(page: import("@playwright/test").Page) {
   await page.waitForLoadState("networkidle");
 }
 
+/**
+ * The timeline renders its clip blocks (role="gridcell") asynchronously as the
+ * project + asset metadata resolve. Poll until the count settles so a baseline
+ * isn't captured mid-render (which produced flaky 0-counts).
+ */
+async function stableClipCount(page: import("@playwright/test").Page): Promise<number> {
+  await page.locator('[role="gridcell"]').first().waitFor({ state: "visible" });
+  let prev = -1;
+  for (let i = 0; i < 12; i++) {
+    const n = await page.locator('[role="gridcell"]').count();
+    if (n === prev) return n;
+    prev = n;
+    await page.waitForTimeout(150);
+  }
+  return prev;
+}
+
 test.describe("Editor — shell layout", () => {
   test("all major panels are visible", async ({ page }) => {
     await openEditor(page);
@@ -59,7 +76,7 @@ test.describe("Editor — transport controls", () => {
     await expect(playBtn).toHaveAttribute("aria-label", "Play");
 
     // Click the body area (not an input) so the keydown reaches the editor handler.
-    await page.locator('[role="banner"]').click();
+    await page.locator('[role="banner"]').click({ position: { x: 8, y: 8 } }); // wordmark, not the centered rename button
     await page.keyboard.press("Space");
 
     await expect(playBtn).toHaveAttribute("aria-label", "Pause");
@@ -74,14 +91,18 @@ test.describe("Editor — undo / redo", () => {
   test("Ctrl+Z undoes the last action", async ({ page }) => {
     await openEditor(page);
 
-    const clipsBefore = await page.locator('[role="gridcell"]').count();
+    // Wait for the initial clips to render so the baseline is stable.
+    const clipsBefore = await stableClipCount(page);
 
-    // Add a clip via the asset-card double-click.
+    // Add a clip via the asset-card double-click (a video add may also create a
+    // linked-audio block, so assert the count INCREASED rather than +1 exactly).
     await page.getByTestId("asset-card").first().dblclick();
-    await expect(page.locator('[role="gridcell"]')).toHaveCount(clipsBefore + 1);
+    await expect.poll(() => page.locator('[role="gridcell"]').count()).toBeGreaterThan(
+      clipsBefore,
+    );
 
     // Undo — click the banner first so no input is focused.
-    await page.locator('[role="banner"]').click();
+    await page.locator('[role="banner"]').click({ position: { x: 8, y: 8 } }); // wordmark, not the centered rename button
     await page.keyboard.press("Control+Z");
     await expect(page.locator('[role="gridcell"]')).toHaveCount(clipsBefore);
   });
@@ -89,15 +110,17 @@ test.describe("Editor — undo / redo", () => {
   test("Ctrl+Shift+Z redoes after undo", async ({ page }) => {
     await openEditor(page);
 
-    const clipsBefore = await page.locator('[role="gridcell"]').count();
+    const clipsBefore = await stableClipCount(page);
     await page.getByTestId("asset-card").first().dblclick();
+    const clipsAfterAdd = await stableClipCount(page);
+    expect(clipsAfterAdd).toBeGreaterThan(clipsBefore);
 
-    await page.locator('[role="banner"]').click();
+    await page.locator('[role="banner"]').click({ position: { x: 8, y: 8 } }); // wordmark, not the centered rename button
     await page.keyboard.press("Control+Z");
     await expect(page.locator('[role="gridcell"]')).toHaveCount(clipsBefore);
 
     await page.keyboard.press("Control+Shift+Z");
-    await expect(page.locator('[role="gridcell"]')).toHaveCount(clipsBefore + 1);
+    await expect(page.locator('[role="gridcell"]')).toHaveCount(clipsAfterAdd);
   });
 });
 

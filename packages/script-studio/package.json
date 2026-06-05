@@ -1,0 +1,34 @@
+{
+  "name": "@videoforge/script-studio",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Script Studio P0 — pure, headless assembler that turns a script string into a valid §18 Project (+ a sidecar ScriptManifest). No TTS, no FFmpeg, no I/O. Depends only on @videoforge/project-schema; reuses @videoforge/templates authoring builders. Text cards are constrained to the export-rendered drawtext subset so preview == export holds by construction.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@videoforge/project-schema": "workspace:*",
+    "@videoforge/templates": "workspace:*"
+  },
+  "devDependencies": {
+    "@videoforge/config": "workspace:*",
+    "typescript": "^5.5.4",
+    "vitest": "^2.0.5"
+  }
+}

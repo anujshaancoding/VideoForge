@@ -1,0 +1,177 @@
+/* ============================================================
+   VideoForge — Design Tokens (dark theme, MVP)
+   Faithfully transcribed from the Design Instructions §2.
+   ============================================================ */
+:root {
+  /* 2.1 Neutral surfaces & elevation */
+  --vf-bg-app: #0B0E14;
+  --vf-surface-canvas-surround: #1A1A2E;
+  --vf-surface-1: #12161F;
+  --vf-surface-2: #1A1F2B;
+  --vf-surface-3: #232A38;
+  --vf-surface-4: #2C3445;
+  --vf-surface-sunken: #080A0F;
+  --vf-border-subtle: #262D3B;
+  --vf-border-default: #3A4357;
+  --vf-border-strong: #525E78;
+  --vf-overlay-scrim: rgba(7, 9, 15, 0.64);
+
+  /* 2.2 Text & icon */
+  --vf-text-primary: #F4F6FB;
+  --vf-text-secondary: #B9C2D4;
+  --vf-text-tertiary: #8A93A8;
+  --vf-text-disabled: #5A6273;
+  --vf-text-inverse: #0B0E14;
+  --vf-icon-default: #C4CCDB;
+  --vf-icon-muted: #8A93A8;
+
+  /* 2.3 Brand & accent — molten ember */
+  --vf-accent: #FF7A1A;
+  --vf-accent-hover: #FF8C3D;
+  --vf-accent-active: #E66610;
+  --vf-accent-subtle: #3A2410;
+  --vf-accent-text: #FFB066;
+  --vf-accent-secondary: #FFC24D;
+  --vf-brand-gradient: linear-gradient(135deg, #FF7A1A 0%, #FFC24D 100%);
+
+  /* 2.4 Semantic */
+  --vf-success-fg: #3FD68C;
+  --vf-success-bg: #16A368;
+  --vf-success-subtle: #10261C;
+  --vf-warning-fg: #FFC24D;
+  --vf-warning-bg: #E0930A;
+  --vf-warning-subtle: #2C2208;
+  --vf-danger-fg: #FF6B6B;
+  --vf-danger-bg: #E03B3B;
+  --vf-danger-subtle: #2E1414;
+  --vf-info-fg: #5BB0FF;
+  --vf-info-bg: #2D7FF0;
+  --vf-info-subtle: #0E2138;
+
+  /* 2.5 Editor / timeline functional */
+  --vf-selection: #3B9EFF;
+  --vf-selection-halo: rgba(11, 14, 20, 0.9);
+  --vf-playhead: #FF3B5C;
+  --vf-snap-line: #FF8A1F;
+  --vf-marker: #FFD23F;
+  --vf-track-grid: #161C27;
+  --vf-ruler-tick: #6B7488;
+  --vf-canvas-bg-default: #111111;
+  --vf-surface-line: #2A2A40;
+
+  /* Track-type colors */
+  --vf-track-video: #2BC4B0;
+  --vf-track-video-fill: #16332F;
+  --vf-track-video-fill-sel: #1C443E;
+  --vf-track-audio: #7C9CFF;
+  --vf-track-audio-fill: #1B2138;
+  --vf-track-audio-fill-sel: #23305A;
+  --vf-track-audio-wave: #A8BCFF;
+  --vf-track-caption: #C58CFF;
+  --vf-track-caption-fill: #241A33;
+  --vf-track-caption-fill-sel: #33244A;
+  --vf-track-overlay: #FF9EC4;
+  --vf-track-overlay-fill: #33212A;
+  --vf-track-overlay-fill-sel: #4A2F3C;
+
+  /* Source-coded video ramp (excludes ember + semantic) */
+  --vf-src-0: #2BC4B0;
+  --vf-src-1: #2BA6C4;
+  --vf-src-2: #3B82C4;
+  --vf-src-3: #6C7CE0;
+  --vf-src-4: #9B7CE0;
+
+  /* 2.6 Typography */
+  --vf-font-sans: "Inter", "Inter var", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --vf-font-mono: "IBM Plex Mono", "Roboto Mono", ui-monospace, "SFMono-Regular", monospace;
+  --vf-font-display: "Inter", "Inter var", sans-serif;
+
+  --vf-text-2xs: 0.6875rem;
+  --vf-text-xs: 0.75rem;
+  --vf-text-sm: 0.8125rem;
+  --vf-text-base: 0.875rem;
+  --vf-text-md: 1rem;
+  --vf-text-lg: 1.25rem;
+  --vf-text-xl: 1.5rem;
+  --vf-text-2xl: 2rem;
+  --vf-text-3xl: 2.5rem;
+
+  --vf-weight-regular: 400;
+  --vf-weight-medium: 500;
+  --vf-weight-semibold: 600;
+  --vf-weight-bold: 700;
+  --vf-weight-extrabold: 800;
+
+  /* 2.7 Spacing (4px base) */
+  --vf-space-0: 0;
+  --vf-space-0\.5: 2px;
+  --vf-space-1: 4px;
+  --vf-space-2: 8px;
+  --vf-space-3: 12px;
+  --vf-space-4: 16px;
+  --vf-space-5: 20px;
+  --vf-space-6: 24px;
+  --vf-space-8: 32px;
+  --vf-space-10: 40px;
+  --vf-space-12: 48px;
+
+  /* Layout constants */
+  --vf-topbar-h: 56px;
+  --vf-transport-h: 48px;
+  --vf-status-h: 28px;
+  --vf-track-header-w: 180px;
+  --vf-left-panel-w: 280px;
+  --vf-right-panel-w: 300px;
+  --vf-timeline-h: 260px;
+
+  /* 2.8 Radii */
+  --vf-radius-none: 0;
+  --vf-radius-xs: 2px;
+  --vf-radius-sm: 4px;
+  --vf-radius-md: 8px;
+  --vf-radius-lg: 12px;
+  --vf-radius-xl: 16px;
+  --vf-radius-pill: 999px;
+  --vf-radius-full: 50%;
+
+  /* 2.9 Stroke */
+  --vf-stroke-hairline: 1px;
+  --vf-stroke-thin: 1.5px;
+  --vf-stroke-default: 2px;
+  --vf-stroke-thick: 3px;
+  --vf-focus-ring-color: #6FB6FF;
+
+  /* 2.10 Shadows */
+  --vf-shadow-0: none;
+  --vf-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.32);
+  --vf-shadow-2: 0 4px 12px rgba(0, 0, 0, 0.40);
+  --vf-shadow-3: 0 12px 32px rgba(0, 0, 0, 0.50);
+  --vf-shadow-4: 0 20px 48px rgba(0, 0, 0, 0.58);
+  --vf-shadow-focus-accent: 0 0 0 3px rgba(255, 122, 26, 0.35);
+  --vf-shadow-inset-well: inset 0 1px 2px rgba(0, 0, 0, 0.45);
+
+  /* 2.11 Motion */
+  --vf-motion-instant: 80ms;
+  --vf-motion-fast: 120ms;
+  --vf-motion-base: 180ms;
+  --vf-motion-slow: 240ms;
+  --vf-motion-deliberate: 320ms;
+  --vf-ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --vf-ease-decelerate: cubic-bezier(0, 0, 0.2, 1);
+  --vf-ease-accelerate: cubic-bezier(0.4, 0, 1, 1);
+  --vf-ease-emphasized: cubic-bezier(0.2, 0, 0, 1.0);
+  --vf-motion-duration: var(--vf-motion-base);
+
+  /* Icon sizes */
+  --vf-icon-sm: 16px;
+  --vf-icon-md: 20px;
+  --vf-icon-lg: 24px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --vf-motion-duration: 0ms; }
+  * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+
+/* Accent override hook for Tweaks */
+:root[data-accent] { }

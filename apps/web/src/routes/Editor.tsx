@@ -11,10 +11,31 @@ import {
   EditorErrorBoundary,
 } from "../components/editor/index.js";
 import { useEditorStore } from "../store/editorStore.js";
+import { useAssetStore } from "../store/assetStore.js";
+import { useAuthStore } from "../store/authStore.js";
 import { getProject } from "../lib/projectStore.js";
+import { apiGetAsset } from "../lib/api.js";
+import { armAutosave, disarmAutosave, saveNow } from "../lib/useAutosave.js";
+import { readViewPrefs, writeViewPrefs } from "../lib/viewPrefs.js";
 import { Button } from "../components/ui/index.js";
 import { previewEngine } from "../engine/index.js";
 import { wsClient } from "../lib/wsClient.js";
+import type { Project } from "@videoforge/project-schema";
+
+/** Every source-asset id referenced by a project (media clips + image-kind overlays). */
+function referencedAssetIds(project: Project): string[] {
+  const ids = new Set<string>();
+  for (const track of project.tracks) {
+    if (track.type === "video" || track.type === "audio" || track.type === "voiceover") {
+      for (const clip of track.clips) ids.add(clip.sourceAssetId);
+    } else if (track.type === "overlay") {
+      for (const ov of track.clips) {
+        if ("sourceAssetId" in ov && ov.sourceAssetId) ids.add(ov.sourceAssetId);
+      }
+    }
+  }
+  return [...ids];
+}
 
 // Editor route (§3.4) — composes the seven zero-prop, store-driven editor shell
 // components into the six-band layout grid:
@@ -36,34 +57,56 @@ export default function Editor() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const loadProject = useEditorStore((s) => s.loadProject);
-  const currentId = useEditorStore((s) => s.project.id);
+  const setZoom = useEditorStore((s) => s.setZoom);
+  // Hydrate from the server document whenever the route id is not yet the loaded
+  // one. We deliberately do NOT short-circuit on `id === currentId`: after a reload
+  // the store is reset to the seed sampleProject, and if the route id happened to
+  // equal the seed id we would otherwise skip fetching the real saved document.
+  const armedId = useEditorStore((s) => s.project.id);
+  // Gate the load on an authenticated session: the access token lives only in
+  // memory and is restored by App's boot refresh. App already holds rendering until
+  // that refresh resolves, so by the time the editor mounts `user` reflects the
+  // real session — if it's null the user is genuinely logged out (RequireAuth
+  // redirects), and we must not fetch logged-out and mask the server document.
+  const user = useAuthStore((s) => s.user);
   const [notFound, setNotFound] = useState(false);
+  const [loadError, setLoadError] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [retry, setRetry] = useState(0);
 
   useEffect(() => {
     if (!id) return;
-    if (id === currentId) {
-      // already loaded into the store
-      setLoading(false);
-      setNotFound(false);
-      return;
-    }
+    if (!user) return; // RequireAuth will redirect; never fetch without a session.
 
     let cancelled = false;
     setLoading(true);
     setNotFound(false);
+    setLoadError(false);
+    // Disarm while (re)loading so autosave can't persist the outgoing doc.
+    disarmAutosave();
     getProject(id)
       .then((project) => {
         if (cancelled) return;
         if (project) {
           loadProject(project);
+          // Restore the persisted timeline zoom (a view pref, not project data) so
+          // the workspace feels stable across reloads. Done AFTER loadProject, which
+          // preserves zoom but resets selection/playhead.
+          const prefs = readViewPrefs();
+          if (typeof prefs.timelineZoom === "number") setZoom(prefs.timelineZoom);
+          // Arm autosave ONLY now that the store holds the real server document, so
+          // the seed/stale state can never be PATCHed back over the saved project.
+          armAutosave(project.id);
           setNotFound(false);
         } else {
           setNotFound(true);
         }
       })
       .catch(() => {
-        if (!cancelled) setNotFound(true);
+        // getProject now rethrows on server-reachable failures (e.g. a 401 auth
+        // race) instead of silently returning stale localStorage data. Surface a
+        // retryable error rather than loading — and overwriting — a masked doc.
+        if (!cancelled) setLoadError(true);
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -72,13 +115,43 @@ export default function Editor() {
     return () => {
       cancelled = true;
     };
-  }, [id, currentId, loadProject]);
+  }, [id, user, retry, loadProject, setZoom]);
+
+  // Disarm autosave when leaving the editor so a stale id can't be saved later.
+  useEffect(() => () => disarmAutosave(), []);
+
+  // Persist the timeline zoom (a view pref) whenever it changes, so a reload
+  // restores the same scale. Subscribing directly keeps this off the render path.
+  useEffect(() => {
+    let prevZoom = useEditorStore.getState().zoom;
+    return useEditorStore.subscribe((s) => {
+      if (s.zoom === prevZoom) return;
+      prevZoom = s.zoom;
+      writeViewPrefs({ timelineZoom: s.zoom });
+    });
+  }, []);
 
   // Connect WebSocket hub for asset:ready + export progress push events.
   useEffect(() => {
-    wsClient.connect('dev-workspace');
+    wsClient.connect();
     return () => wsClient.disconnect();
   }, []);
+
+  // Hydrate the asset registry for every asset the loaded project references, so the
+  // preview/audio engines can resolve real presigned proxy URLs (not synthesised ones).
+  useEffect(() => {
+    if (loading || notFound || loadError) return;
+    const project = useEditorStore.getState().project;
+    const { assets, registerFromRecord } = useAssetStore.getState();
+    let cancelled = false;
+    for (const assetId of referencedAssetIds(project)) {
+      if (assets[assetId]?.proxyUrl) continue; // already resolved
+      void apiGetAsset(assetId)
+        .then((rec) => { if (!cancelled) registerFromRecord(rec); })
+        .catch(() => { /* missing asset — engine falls back to the stub rect */ });
+    }
+    return () => { cancelled = true; };
+  }, [armedId, loading, notFound, loadError]);
 
   // ── Global keyboard shortcuts ─────────────────────────────────────────────
   const togglePlay = useEditorStore((s) => s.togglePlay);
@@ -93,10 +166,28 @@ export default function Editor() {
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
-      // Don't intercept shortcuts when the user is typing in an input/textarea.
-      const tag = (e.target as HTMLElement).tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || (e.target as HTMLElement).isContentEditable)
-        return;
+      // Don't intercept shortcuts while the user is TYPING in a text field. We only
+      // bail for genuine text entry (textarea, contentEditable, or text-like inputs)
+      // — NOT for range sliders / checkboxes / buttons, which are <input>s too but
+      // do not consume typing. Bailing on those broke keyboard undo/redo after an
+      // edit moved focus to a slider (e.g. the playhead).
+      const target = e.target as HTMLElement;
+      const tag = target.tagName;
+      const NON_TEXT_INPUT = new Set([
+        "range",
+        "checkbox",
+        "radio",
+        "button",
+        "submit",
+        "reset",
+        "color",
+        "file",
+      ]);
+      const isTextEntry =
+        tag === "TEXTAREA" ||
+        target.isContentEditable ||
+        (tag === "INPUT" && !NON_TEXT_INPUT.has((target as HTMLInputElement).type));
+      if (isTextEntry) return;
 
       const mod = e.metaKey || e.ctrlKey;
 
@@ -116,6 +207,10 @@ export default function Editor() {
         // Ctrl/Cmd+D → duplicate selected
         e.preventDefault();
         duplicateSelected();
+      } else if (mod && e.code === "KeyS") {
+        // Ctrl/Cmd+S → force an immediate save (don't let the browser "Save page").
+        e.preventDefault();
+        saveNow();
       } else if (e.code === "KeyS" && !mod) {
         // S → split at playhead
         e.preventDefault();
@@ -161,7 +256,7 @@ export default function Editor() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [handleKeyDown]);
 
-  if (loading && !notFound) {
+  if (loading && !notFound && !loadError) {
     return (
       <main
         role="status"
@@ -169,6 +264,28 @@ export default function Editor() {
         className="flex h-full flex-col items-center justify-center gap-4 bg-vf-bg-app text-center"
       >
         <p className="text-sm text-vf-text-secondary">Loading project…</p>
+      </main>
+    );
+  }
+
+  // Server-reachable load failure (e.g. a transient 401 during session restore).
+  // We intentionally did NOT fall back to stale local data, so offer a retry rather
+  // than loading — and risking overwriting — a masked document.
+  if (loadError) {
+    return (
+      <main className="flex h-full flex-col items-center justify-center gap-4 bg-vf-bg-app text-center">
+        <h1 className="text-xl font-bold text-vf-text-primary">Couldn&rsquo;t load this project</h1>
+        <p className="max-w-sm text-sm text-vf-text-secondary">
+          Your work is safe on the server. This was likely a temporary hiccup — try again.
+        </p>
+        <div className="flex gap-2">
+          <Button variant="primary" onClick={() => setRetry((n) => n + 1)}>
+            Retry
+          </Button>
+          <Button variant="secondary" onClick={() => navigate("/")}>
+            Back to dashboard
+          </Button>
+        </div>
       </main>
     );
   }

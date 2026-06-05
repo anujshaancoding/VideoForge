@@ -13,6 +13,19 @@ export * from "./types.js";
 export * from "./schema.js";
 export { sampleProject, default as sampleProjectDefault } from "./fixtures/sampleProject.js";
 
+// Shared text-overlay layout — the ONE percent→pixel/size/floor/stroke formula +
+// weight→Inter map that both the preview canvas and the FFmpeg export consume, so
+// they cannot drift (Text_Overlay_Export_Spec.md §7.5). Pixel imports these in
+// `apps/web` `PreviewEngine`; `@videoforge/ffmpeg-graph` imports them on the export side.
+export {
+  layoutTextOverlay,
+  weightToInterFace,
+  weightToInterFile,
+  DEFAULT_LINE_HEIGHT,
+  FONT_PX_FLOOR,
+} from "./textOverlayLayout.js";
+export type { TextLayout, InterFace } from "./textOverlayLayout.js";
+
 /**
  * Current project schema version. Incremented only on breaking schema changes;
  * the server migrates older documents on open (§18.3). New documents are stamped
@@ -65,7 +78,24 @@ export function newProject(opts: NewProjectOptions): Project {
       aspectRatio: deriveAspectRatio(opts.canvasWidth, opts.canvasHeight),
       backgroundColor: "#111111",
     },
-    tracks: [],
+    // Seed a single empty video track so a fresh project has a visible lane to drop
+    // clips onto (an editor with zero tracks reads as broken — there was nowhere to
+    // add the first clip). Importing still auto-creates the right lane if no
+    // suitable track exists (apps/web MediaPanel), so this is a UX default, not a
+    // hard dependency.
+    tracks: [
+      {
+        id: uuidv4(),
+        type: "video",
+        name: "Video 1",
+        colour: "#3A6BFF",
+        height: 72,
+        muted: false,
+        solo: false,
+        locked: false,
+        clips: [],
+      },
+    ],
     captionTracks: [],
     transitions: [],
     markers: [],

@@ -3,6 +3,10 @@ import { selectProjectDurationMs, useEditorStore } from '../../store/editorStore
 import { Button, cx, Modal } from '../ui/index.js';
 import { apiCreateExport, apiPollExportComplete, apiGetDownloadUrl } from '../../lib/api.js';
 import { wsClient } from '../../lib/wsClient.js';
+import { clearFirstSession, isFirstSession } from '../../lib/firstSession.js';
+import { trackEvent } from '../../lib/analytics.js';
+import { resolveManifest } from '../../store/templateStore.js';
+import { pruneUnfilledSlots, unfilledMediaSlotCount } from '../../lib/templates.js';
 
 // ExportModal (§8.2) — MP4/H.264, ≤1080p Free-tier cap, social presets.
 // Real flow: POST /api/v1/exports → poll until COMPLETE → mint download URL.
@@ -46,6 +50,14 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
   const [captions, setCaptions] = useState<CaptionMode>(hasCaptions ? 'burn' : 'none');
   const [sidecarFmt, setSidecarFmt] = useState<'.srt' | '.vtt'>('.srt');
 
+  // Snapshot first-session at open so the watermark disclosure + TTFE event stay
+  // consistent for THIS export even after the flag is cleared on download. Re-read each
+  // time the modal opens (a creator's very first export only — clears on download).
+  const [firstSession, setFirstSession] = useState(false);
+  useEffect(() => {
+    if (open) setFirstSession(isFirstSession());
+  }, [open]);
+
   const [phase, setPhase] = useState<Phase>('config');
   const [progress, setProgress] = useState(0);
   const [etaSeconds, setEtaSeconds] = useState<number | null>(null);
@@ -83,6 +95,15 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
   const sizeMb = estimateSizeMb(dims.w, dims.h, fps, durationMs);
   const overCap = Math.min(project.canvas.width, project.canvas.height) > 1080;
 
+  // Template empty-slot warning (Templates_Spec AC-7 / Templates_Architecture §5):
+  // non-blocking — count unfilled media slots so the user knows they'll be dropped
+  // from the export. Export stays ENABLED. `pruneUnfilledSlots` (lib/templates) removes
+  // these placeholders from a clone of the doc before render so the graph stays valid.
+  const unfilledSlots = useMemo(() => {
+    const manifest = resolveManifest(project);
+    return manifest ? unfilledMediaSlotCount(project, manifest) : 0;
+  }, [project]);
+
   const handleExport = useCallback(async () => {
     setPhase('exporting');
     setProgress(0);
@@ -94,6 +115,14 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
     teardownWs();
 
     try {
+      // WYCIWYG render-snapshot: send the EXACT document the preview used so the worker
+      // renders precisely what's on screen. For a template-derived project we prune the
+      // unfilled optional slots first (lib/templates) so the graph references only real,
+      // resolvable media — a partially-filled template still produces a valid video. For a
+      // normal project there's no manifest, so we send the current document unchanged.
+      const manifest = resolveManifest(project);
+      const document = manifest ? pruneUnfilledSlots(project, manifest) : project;
+
       const rec = await apiCreateExport({
         projectId: project.id,
         settings: {
@@ -105,6 +134,7 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
           captions: hasCaptions ? captions : 'none',
           watermark: true,
         },
+        document,
       });
 
       // Surface proxy-downgrade warnings from the POST /exports response early.
@@ -165,7 +195,27 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
         setPhase('error');
       }
     }
-  }, [project.id, dims, fps, captions, hasCaptions, teardownWs]);
+  }, [project, dims, fps, captions, hasCaptions, teardownWs]);
+
+  // Fire the TTFE (time-to-first-export) event + clear the first-session flag exactly
+  // ONCE, on the first successful export's Download click (the brief's hook point).
+  // Guarded so a second download click (fresh link) doesn't re-fire. trackEvent is a
+  // dependency-free no-op until Anchor wires Sentry, so this is always safe.
+  const ttfeFiredRef = useRef(false);
+  const handleDownloadClick = useCallback(() => {
+    if (!firstSession || ttfeFiredRef.current) return;
+    ttfeFiredRef.current = true;
+    const created = Date.parse(project.createdAt);
+    const durationSinceCreateMs = Number.isFinite(created)
+      ? Math.max(0, Date.now() - created)
+      : null;
+    trackEvent('ttfe:export_complete', {
+      durationMs: durationSinceCreateMs, // ms from project create → first export
+      projectId: project.id,
+      aspectRatio: project.canvas.aspectRatio,
+    });
+    clearFirstSession();
+  }, [firstSession, project.createdAt, project.id, project.canvas.aspectRatio]);
 
   const handleClose = () => {
     abortRef.current = true;
@@ -202,6 +252,8 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
                 download="export.mp4"
                 target="_blank"
                 rel="noreferrer"
+                onClick={handleDownloadClick}
+                data-testid="download-mp4"
                 className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-vf-accent px-3 text-sm font-medium text-vf-text-inverse hover:bg-vf-accent-hover"
               >
                 Download MP4
@@ -245,9 +297,15 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
 
       {phase === 'done' && (
         <div className="flex flex-col items-center gap-3 py-8 text-center">
-          <span aria-hidden="true" className="text-4xl">✅</span>
+          <span aria-hidden="true" className="text-4xl text-vf-success-fg">✅</span>
           <p className="text-base font-medium text-vf-text-primary">Your export is ready</p>
-          <p className="text-sm text-vf-text-secondary">
+          {/* Parity reveal (§6.5 / the invariant): state what just happened, at the exact
+              moment the user holds the file and can verify it against the preview. */}
+          <p className="max-w-sm text-sm text-vf-text-secondary">
+            This MP4 was built from the same edit graph your preview used. Every trim, cut, and clip
+            is exactly as you arranged it.
+          </p>
+          <p className="text-2xs text-vf-text-tertiary">
             Available for download for 7 days. Each click mints a fresh 1-hour link.
           </p>
           {warnings.length > 0 && (
@@ -273,6 +331,36 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
 
       {phase === 'config' && (
         <>
+          {/* First-session watermark disclosure (§6.5): shown ONCE, before a creator's
+              first export, so the watermark is never a surprise on the downloaded file. */}
+          {firstSession && (
+            <div
+              data-testid="watermark-disclosure"
+              className="mb-4 flex items-start gap-2 rounded-md border border-vf-info-fg/40 bg-vf-info-bg p-3 text-2xs text-vf-text-secondary"
+            >
+              <span aria-hidden="true" className="text-vf-info-fg">ⓘ</span>
+              <span>
+                Heads up: free-plan exports include a small VideoForge watermark in the
+                bottom-right corner. Everything else is exactly as you arranged it.
+              </span>
+            </div>
+          )}
+
+          {/* Empty-slot warning (AC-7): non-blocking; Export stays enabled. */}
+          {unfilledSlots > 0 && (
+            <div
+              data-testid="empty-slot-warning"
+              className="mb-4 flex items-start gap-2 rounded-md border border-vf-warning-fg/40 bg-vf-surface-2 p-3 text-2xs text-vf-text-secondary"
+            >
+              <span aria-hidden="true" className="text-vf-warning-fg">⚠</span>
+              <span>
+                You have {unfilledSlots} unfilled {unfilledSlots === 1 ? 'slot' : 'slots'}. They'll be
+                left out of the export so your video renders cleanly. You can still export now, or go
+                back and add media.
+              </span>
+            </div>
+          )}
+
           {/* Tabs */}
           <div role="tablist" aria-label="Export settings" className="mb-4 flex gap-1 border-b border-vf-border-subtle">
             {([['format', 'Format & Quality'], ['captions', 'Captions']] as Array<['format' | 'captions', string]>).map(

@@ -6,11 +6,13 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { describe, it, expect } from "vitest";
-import { sampleProject } from "@videoforge/project-schema";
+import { sampleProject, type Project } from "@videoforge/project-schema";
 import {
   buildExportCommand,
   captionsToSrt,
   atempoChain,
+  projectDurationMs,
+  EMPTY_PROJECT_DURATION_MS,
   type ExportSettings,
 } from "../buildFilterComplex.js";
 
@@ -59,6 +61,86 @@ describe("buildExportCommand — crossfade transition (xfade, §6.4/§10.3)", ()
     // CLIP_A timeline length = 4000ms, transition 500ms → offset 3500ms = 3.5s.
     const { filterComplex } = buildExportCommand(sampleProject, burnSettings);
     expect(filterComplex).toContain("xfade=transition=fade:duration=0.5:offset=3.5");
+  });
+});
+
+describe("buildExportCommand — clip placement (the 'what you cut is what you get' fix)", () => {
+  // Regression for the overlay-placement bug: clips were composited at PTS 0 with
+  // overlay=0:0, so a clip at startOnTimeline>0 showed the WRONG frames. Each clip /
+  // transition group must be DELAYED to its timeline start before the overlay.
+  function shiftFirstVideoClip(ms: number): Project {
+    const p: Project = JSON.parse(JSON.stringify(sampleProject));
+    const vt = p.tracks.find((t) => t.type === "video");
+    if (vt && vt.type === "video") {
+      // Drop transitions so we test a bare clip placement (no xfade fusion).
+      p.transitions = [];
+      const clip = vt.clips[0]!;
+      const span = clip.endOnTimeline - clip.startOnTimeline;
+      clip.startOnTimeline = ms;
+      clip.endOnTimeline = ms + span;
+    }
+    return p;
+  }
+
+  it("delays a clip's stream to its timeline start (setpts offset) before overlay", () => {
+    const { filterComplex } = buildExportCommand(shiftFirstVideoClip(2000), burnSettings);
+    expect(filterComplex).toContain("setpts=PTS-STARTPTS+2/TB");
+  });
+
+  it("gates the overlay to the clip's [start,end] window", () => {
+    const { filterComplex } = buildExportCommand(shiftFirstVideoClip(2000), burnSettings);
+    expect(filterComplex).toMatch(/overlay=0:0:enable='between\(t,2,/);
+  });
+});
+
+describe("buildExportCommand — per-clip transform (PiP) export parity", () => {
+  function withFirstClipTransform(
+    tf: { x: number; y: number; width: number; height: number } | null,
+  ): Project {
+    const p: Project = JSON.parse(JSON.stringify(sampleProject));
+    p.transitions = []; // no xfade fusion → the single clip's overlay is asserted directly
+    const vt = p.tracks.find((t) => t.type === "video");
+    if (vt && vt.type === "video") {
+      if (tf) vt.clips[0]!.transform = tf;
+      else delete vt.clips[0]!.transform;
+    }
+    return p;
+  }
+
+  it("scales a transformed clip to its box and overlays at its position (1080x1920 → 540x960 @270,480)", () => {
+    const { filterComplex } = buildExportCommand(
+      withFirstClipTransform({ x: 25, y: 25, width: 50, height: 50 }),
+      burnSettings,
+    );
+    expect(filterComplex).toContain("scale=540:960");
+    expect(filterComplex).toMatch(/overlay=270:480:enable=/);
+  });
+
+  it("leaves a clip WITHOUT a transform full-frame, overlaid at 0:0 (byte-compatible default)", () => {
+    const { filterComplex } = buildExportCommand(withFirstClipTransform(null), burnSettings);
+    expect(filterComplex).toContain("force_original_aspect_ratio=decrease");
+    expect(filterComplex).toMatch(/overlay=0:0:enable=/);
+  });
+
+  it("forces even box dimensions (libx264) for odd-percent boxes", () => {
+    // 33% of 1080 = 356.4 → even 356; 33% of 1920 = 633.6 → even 634.
+    const { filterComplex } = buildExportCommand(
+      withFirstClipTransform({ x: 0, y: 0, width: 33, height: 33 }),
+      burnSettings,
+    );
+    expect(filterComplex).toContain("scale=356:634");
+  });
+
+  it("emits hflip/vflip for a mirrored clip (export parity with the canvas)", () => {
+    const p = withFirstClipTransform(null);
+    const vt = p.tracks.find((t) => t.type === "video");
+    if (vt && vt.type === "video") {
+      vt.clips[0]!.flipH = true;
+      vt.clips[0]!.flipV = true;
+    }
+    const { filterComplex } = buildExportCommand(p, burnSettings);
+    expect(filterComplex).toContain("hflip");
+    expect(filterComplex).toContain("vflip");
   });
 });
 
@@ -216,5 +298,88 @@ describe("buildExportCommand — speed clips emit setpts/atempo (§3.3/§5.1)", 
     const { filterComplex } = buildExportCommand(sped, burnSettings);
     expect(filterComplex).toContain("setpts=0.5*PTS");
     expect(filterComplex).toContain("atempo=2");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bounded-duration gate — the runaway-export fix (dev-worker incident: an empty
+// timeline + watermark made `color` generate frames forever, so `overlay` and the
+// encode never terminated). The export MUST be bounded to the timeline extent both
+// at the synthetic base source (`:d=`) and at the output (`-t`), and an EMPTY
+// timeline must still produce a SHORT, bounded command — never an infinite one.
+// Bounding to the timeline length UPHOLDS WYCIWYG: the MP4 is exactly as long as
+// the timeline the preview spans.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("projectDurationMs — timeline extent (deterministic bound)", () => {
+  it("returns the max clip endOnTimeline across all tracks", () => {
+    // sampleProject: furthest clip endOnTimeline is 8000ms (audio + video B).
+    expect(projectDurationMs(sampleProject)).toBe(8000);
+  });
+
+  it("includes caption blocks when they extend past the last clip", () => {
+    const p = structuredClone(sampleProject);
+    // Drop every clip so only captions remain; the last caption block ends at 7000ms.
+    for (const t of p.tracks) (t as { clips: unknown[] }).clips = [];
+    expect(projectDurationMs(p)).toBe(7000);
+  });
+
+  it("falls back to the documented empty-project duration for a bare timeline", () => {
+    const p = structuredClone(sampleProject);
+    for (const t of p.tracks) (t as { clips: unknown[] }).clips = [];
+    p.captionTracks = [];
+    expect(projectDurationMs(p)).toBe(EMPTY_PROJECT_DURATION_MS);
+    expect(EMPTY_PROJECT_DURATION_MS).toBe(1000);
+  });
+
+  it("is pure/deterministic", () => {
+    expect(projectDurationMs(sampleProject)).toBe(projectDurationMs(sampleProject));
+  });
+});
+
+describe("buildExportCommand — bounded output duration (runaway-export fix)", () => {
+  it("bounds the synthetic canvas base source with :d=<timeline length>", () => {
+    // 8000ms timeline → :d=8 ; without this the `color` source runs forever.
+    const { filterComplex } = buildExportCommand(sampleProject, burnSettings);
+    expect(filterComplex).toMatch(/color=c=0x[0-9A-Fa-f]+:s=\d+x\d+:r=\d+:d=8\[base\]/);
+  });
+
+  it("emits a -t output cap equal to the timeline length", () => {
+    const { args } = buildExportCommand(sampleProject, burnSettings);
+    // -t is an output option: it must appear before the output filename.
+    const tIdx = args.indexOf("-t");
+    expect(tIdx).toBeGreaterThan(-1);
+    expect(args[tIdx + 1]).toBe("8");
+    expect(args.indexOf("out.mp4")).toBeGreaterThan(tIdx);
+  });
+
+  it("an EMPTY timeline yields a SHORT, BOUNDED command (never infinite) — even with watermark on", () => {
+    // The exact incident reproducer: a track with clips:[] and watermark:true.
+    const empty = structuredClone(sampleProject);
+    for (const t of empty.tracks) (t as { clips: unknown[] }).clips = [];
+    empty.captionTracks = [];
+    empty.transitions = [];
+
+    const { args, filterComplex } = buildExportCommand(empty, {
+      ...burnSettings,
+      captions: "none", // no caption track remains
+    });
+
+    // Base source is bounded to the 1s empty-project floor — NOT an unbounded color=.
+    expect(filterComplex).toMatch(/color=c=0x[0-9A-Fa-f]+:s=\d+x\d+:r=\d+:d=1\[base\]/);
+    // And the output is hard-capped at 1s.
+    const tIdx = args.indexOf("-t");
+    expect(tIdx).toBeGreaterThan(-1);
+    expect(args[tIdx + 1]).toBe("1");
+    // The watermark overlay is still present (Free-tier invariant) but no longer runaway.
+    expect(filterComplex).toContain("overlay=W-w-16:H-h-16");
+  });
+
+  it("the duration bound tracks the project (shifting a clip later lengthens the cap)", () => {
+    const longer = structuredClone(sampleProject);
+    const vt = longer.tracks.find((t) => t.type === "video")!;
+    vt.clips[0]!.endOnTimeline = 12000; // push the timeline out to 12s
+    const { args } = buildExportCommand(longer, burnSettings);
+    const tIdx = args.indexOf("-t");
+    expect(args[tIdx + 1]).toBe("12");
   });
 });

@@ -10,10 +10,14 @@ export {
   buildExportCommand,
   captionsToSrt,
   atempoChain,
+  projectDurationMs,
+  EMPTY_PROJECT_DURATION_MS,
 } from "./buildFilterComplex.js";
 
 export type {
   ExportSettings,
   InputSpec,
   BuildResult,
+  TextFileSpec,
+  FontSpec,
 } from "./buildFilterComplex.js";
