@@ -381,12 +381,12 @@ export default function Editor() {
         // Cmd+/ → toggle left sidebar (media panel or close)
         e.preventDefault();
         setLeftRailTab(leftRailTab ? null : 'media');
-      } else if (mod && (e.code === "KeyB" || e.code === "KeyI")) {
-        // Cmd+B/I text formatting — toggle on selected text overlay (F06). We only
-        // ever write §18-valid TextStyle fields (fontWeight, italic) so the document
-        // always passes export validation. Underline (Cmd+U) is intentionally NOT
-        // handled: it has no §18 representation and no FFmpeg drawtext support yet —
-        // see ROADMAP "underline end-to-end" (needs a shared text-metrics subsystem).
+      } else if (mod && (e.code === "KeyB" || e.code === "KeyI" || e.code === "KeyU")) {
+        // Cmd+B/I/U text formatting — toggle on selected text overlay (F06). We only
+        // ever write §18-valid TextStyle fields (fontWeight, italic, underline) so the
+        // document always passes export validation. Underline is end-to-end: the export
+        // draws a filled rule (drawbox) and the preview the matching rect from the SHARED
+        // `underlineRule` text-metrics helper, so preview == export.
         e.preventDefault();
         const st = useEditorStore.getState();
         const sel = st.selection;
@@ -401,6 +401,8 @@ export default function Editor() {
               style.fontWeight = (style.fontWeight || 600) >= 700 ? 400 : 700;
             } else if (e.code === "KeyI") {
               style.italic = !style.italic;
+            } else if (e.code === "KeyU") {
+              style.underline = !style.underline;
             }
             useEditorStore.setState((s) => {
               for (const tt of s.project.tracks) {

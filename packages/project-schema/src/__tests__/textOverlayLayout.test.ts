@@ -15,6 +15,10 @@ import {
   layoutTextOverlay,
   weightToInterFace,
   weightToInterFile,
+  measureTextWidth,
+  underlineRule,
+  DEFAULT_ADVANCE_EM,
+  UNDERLINE_THICKNESS_EM,
   DEFAULT_LINE_HEIGHT,
   FONT_PX_FLOOR,
 } from "../textOverlayLayout.js";
@@ -207,5 +211,97 @@ describe("weightToInterFile — TTF basenames (§7.3)", () => {
 
   it("returns a bare basename, never an absolute path (purity for the graph builder)", () => {
     expect(weightToInterFile(600)).not.toContain("/");
+  });
+});
+
+// ── Text-metrics / underline subsystem (the underline milestone) ─────────────────
+// The underline rule's WIDTH/GEOMETRY must come from ONE shared helper so the preview
+// (filled rect) and the export (drawbox) agree. These lock that contract; the table is
+// an approximation but it is the SAME table on both sides — the invariant property.
+
+describe("measureTextWidth — shared Inter advance measurer", () => {
+  it("scales linearly with fontPx", () => {
+    const w1 = measureTextWidth("Hello", 48, 400);
+    const w2 = measureTextWidth("Hello", 96, 400);
+    expect(w2).toBeCloseTo(w1 * 2, 5);
+  });
+
+  it("is the sum of per-glyph advances × fontPx (Regular = scale 1)", () => {
+    // "ll" → 0.25 + 0.25 = 0.5 em; at 100px → 50px.
+    expect(measureTextWidth("ll", 100, 400)).toBeCloseTo(50, 5);
+  });
+
+  it("uses the default advance for unknown code points", () => {
+    // An emoji / non-ASCII char falls back to DEFAULT_ADVANCE_EM.
+    expect(measureTextWidth("☃", 100, 400)).toBeCloseTo(DEFAULT_ADVANCE_EM * 100, 5);
+  });
+
+  it("heavier weights are slightly wider (per-face scale, monotonic)", () => {
+    const regular = measureTextWidth("Hello", 48, 400);
+    const bold = measureTextWidth("Hello", 48, 700);
+    const extra = measureTextWidth("Hello", 48, 800);
+    expect(bold).toBeGreaterThan(regular);
+    expect(extra).toBeGreaterThan(bold);
+  });
+
+  it("empty string measures zero", () => {
+    expect(measureTextWidth("", 48, 600)).toBe(0);
+  });
+});
+
+describe("underlineRule — geometry (preview rect == export drawbox)", () => {
+  const baseLayout = { anchorX: 540, fontPx: 48 };
+
+  it("width equals the measured text width", () => {
+    const r = underlineRule(baseLayout, "center", 1000, "Hello", 600);
+    expect(r.width).toBe(Math.round(measureTextWidth("Hello", 48, 600)));
+  });
+
+  it("thickness = round(fontPx * UNDERLINE_THICKNESS_EM), min 1", () => {
+    const r = underlineRule(baseLayout, "left", 1000, "Hi", 400);
+    expect(r.height).toBe(Math.max(1, Math.round(48 * UNDERLINE_THICKNESS_EM)));
+  });
+
+  it("left align: rule starts at anchorX", () => {
+    const r = underlineRule(baseLayout, "left", 1000, "Hi", 400);
+    expect(r.x).toBe(540);
+  });
+
+  it("right align: rule ends at anchorX", () => {
+    const r = underlineRule(baseLayout, "right", 1000, "Hi", 400);
+    expect(r.x + r.width).toBe(540);
+  });
+
+  it("center align: rule is centred on anchorX", () => {
+    const r = underlineRule(baseLayout, "center", 1000, "Hi", 400);
+    expect(r.x).toBe(Math.round(540 - r.width / 2));
+  });
+
+  it("sits BELOW the line centre (y > lineCenterY)", () => {
+    const r = underlineRule(baseLayout, "left", 1000, "Hi", 400);
+    expect(r.y).toBeGreaterThan(1000);
+  });
+
+  it("is deterministic — same inputs ⇒ identical box (preview/export agree by construction)", () => {
+    const a = underlineRule(baseLayout, "center", 1000, "VideoForge", 700);
+    const b = underlineRule(baseLayout, "center", 1000, "VideoForge", 700);
+    expect(a).toEqual(b);
+  });
+});
+
+describe("underline parity — preview px == export px * scale", () => {
+  it("the underline rule scales uniformly with the surface (the invariant)", () => {
+    const ov: TextOverlay = makeOverlay({
+      style: { ...makeOverlay().style, align: "center", underline: true, fontSize: 48 },
+    });
+    const scale = 720 / 1920;
+    const exp = layoutTextOverlay(ov, 1080, 1920, 1920);
+    const prev = layoutTextOverlay(ov, 405, 720, 1920);
+    const centerYExp = exp.boxY + exp.boxH / 2;
+    const centerYPrev = prev.boxY + prev.boxH / 2;
+    const rExp = underlineRule(exp, "center", centerYExp, "Hello", 600);
+    const rPrev = underlineRule(prev, "center", centerYPrev, "Hello", 600);
+    // Width tracks fontPx which scales by `scale`; allow ±1px rounding.
+    expect(Math.abs(rPrev.width - rExp.width * scale)).toBeLessThanOrEqual(1);
   });
 });

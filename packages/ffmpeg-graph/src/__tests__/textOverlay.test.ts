@@ -349,3 +349,57 @@ describe("drawtext deferred-feature omission (§9)", () => {
     expect(dt).not.toContain("shadowx");
   });
 });
+
+// ── Underline rule via drawbox (the underline milestone) ─────────────────────────────
+// drawtext can't underline, so an underlined overlay emits a filled `drawbox` rule under
+// each line, with geometry from the SHARED `underlineRule` helper (same width/position
+// the preview draws), in the text colour + alpha, chained after the drawtext.
+describe("underline → drawbox rule", () => {
+  function drawboxOf(project: Project): string | undefined {
+    const { filterComplex } = buildExportCommand(project, settings);
+    return filterComplex.split(";").find((p) => p.includes("drawbox"));
+  }
+
+  it("emits NO drawbox when underline is unset (existing graphs unchanged)", () => {
+    const ov = textOverlay({ id: "00000000-0000-4000-8000-000000000001" });
+    expect(drawboxOf(projectWith([ov]))).toBeUndefined();
+  });
+
+  it("emits a filled drawbox in the text colour after the drawtext when underline is set", () => {
+    const ov = textOverlay({
+      id: "00000000-0000-4000-8000-000000000001",
+      style: { underline: true, color: "#FF7A1A" } as never,
+    });
+    const { filterComplex } = buildExportCommand(projectWith([ov]), settings);
+    const parts = filterComplex.split(";");
+    const dtIdx = parts.findIndex((p) => p.includes("drawtext"));
+    const boxIdx = parts.findIndex((p) => p.includes("drawbox"));
+    expect(boxIdx).toBeGreaterThan(dtIdx); // rule chains AFTER the glyphs
+    const box = parts[boxIdx]!;
+    expect(box).toContain("[vtext0]drawbox="); // consumes the drawtext output
+    expect(box).toContain("color=0xFF7A1A@1"); // text colour + alpha
+    expect(box).toContain("t=fill");
+    expect(box).toContain("enable='between(t,0,3)'"); // same timing window
+    expect(box).toMatch(/w=\d+:h=\d+/); // concrete pixel width/height (not text_w)
+  });
+
+  it("multiplies the underline alpha by overlay opacity (matches the fill)", () => {
+    const ov = textOverlay({
+      id: "00000000-0000-4000-8000-000000000001",
+      opacity: 60,
+      style: { underline: true, color: "#FFFFFF" } as never,
+    });
+    expect(drawboxOf(projectWith([ov]))).toContain("color=0xFFFFFF@0.6");
+  });
+
+  it("emits ONE rule per non-empty line for multi-line text", () => {
+    const ov = textOverlay({
+      id: "00000000-0000-4000-8000-000000000001",
+      text: "Line one\nLine two\nLine three",
+      style: { underline: true } as never,
+    });
+    const { filterComplex } = buildExportCommand(projectWith([ov]), settings);
+    const boxes = filterComplex.split(";").filter((p) => p.includes("drawbox"));
+    expect(boxes).toHaveLength(3);
+  });
+});

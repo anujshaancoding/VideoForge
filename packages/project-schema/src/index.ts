@@ -21,10 +21,15 @@ export {
   layoutTextOverlay,
   weightToInterFace,
   weightToInterFile,
+  measureTextWidth,
+  underlineRule,
   DEFAULT_LINE_HEIGHT,
   FONT_PX_FLOOR,
+  DEFAULT_ADVANCE_EM,
+  UNDERLINE_OFFSET_EM,
+  UNDERLINE_THICKNESS_EM,
 } from "./textOverlayLayout.js";
-export type { TextLayout, InterFace } from "./textOverlayLayout.js";
+export type { TextLayout, InterFace, UnderlineRule } from "./textOverlayLayout.js";
 
 /**
  * Current project schema version. Incremented only on breaking schema changes;

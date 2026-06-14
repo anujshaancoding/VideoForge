@@ -857,18 +857,20 @@ function OverlayInspector({ overlay }: { overlay: OverlayClip }) {
           <span className="text-xs text-vf-text-primary vf-tnum">{t.style.color}</span>
         </div>
 
-        {/* F06: B / I toggles (match Canva floating toolbar). We only write §18-valid
-            TextStyle fields (fontWeight, italic) — both render identically in the
-            FFmpeg export (the graph picks the matching bundled Inter face), so the
-            document always passes export validation. Underline is deferred: drawtext
-            has no underline and it needs a shared text-metrics subsystem to honour the
-            preview==export invariant — see ROADMAP "underline end-to-end". */}
+        {/* F06: B / I / U toggles (match Canva floating toolbar). We only write §18-valid
+            TextStyle fields (fontWeight, italic, underline) — all render identically in
+            the FFmpeg export, so the document always passes export validation. Underline
+            is end-to-end: drawtext has no underline, so the export draws a filled rule
+            (drawbox) under the text and the preview draws the matching rect, both from the
+            SHARED `underlineRule` text-metrics helper, so preview == export. We write the
+            schema `underline` field — NOT the old bad `textDecoration` key. */}
         <div className="flex items-center gap-2">
           <label className="w-24 shrink-0 text-xs text-vf-text-secondary">Style</label>
           <div className="flex gap-1">
             {[
               { key: "B", label: "B", title: "Bold (⌘B)", active: (t.style.fontWeight || 600) >= 700, toggle: () => patchStyle({ fontWeight: (t.style.fontWeight || 600) >= 700 ? 400 : 700 }) },
               { key: "I", label: "I", title: "Italic (⌘I)", active: t.style.italic === true, toggle: () => patchStyle({ italic: !t.style.italic }) },
+              { key: "U", label: "U", title: "Underline (⌘U)", active: t.style.underline === true, toggle: () => patchStyle({ underline: !t.style.underline }) },
             ].map((b) => (
               <button
                 key={b.key}
@@ -878,6 +880,7 @@ function OverlayInspector({ overlay }: { overlay: OverlayClip }) {
                 className={cx(
                   "h-7 w-7 rounded border text-xs font-semibold",
                   b.key === "I" && "italic",
+                  b.key === "U" && "underline",
                   b.active
                     ? "border-vf-accent bg-vf-accent text-white"
                     : "border-vf-border-default bg-vf-surface-2 text-vf-text-primary hover:bg-vf-surface-3"

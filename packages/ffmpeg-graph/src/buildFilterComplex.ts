@@ -52,7 +52,12 @@ import type {
   Effect,
   Keyframe,
 } from "@videoforge/project-schema";
-import { layoutTextOverlay, weightToInterFile } from "@videoforge/project-schema";
+import {
+  layoutTextOverlay,
+  weightToInterFile,
+  underlineRule,
+  DEFAULT_LINE_HEIGHT,
+} from "@videoforge/project-schema";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public types
@@ -677,6 +682,37 @@ function buildTextOverlayStage(
       );
       current = out;
       n += 1;
+
+      // ── Underline rule (the underline milestone) ──────────────────────────────
+      // drawtext cannot underline, so when `style.underline` is set we draw a FILLED
+      // box (`drawbox`) under EACH line, using the SHARED `underlineRule` geometry — the
+      // SAME width (from `measureTextWidth`'s Inter advance table) and the SAME per-line
+      // centre math the preview uses, so preview == export by construction. Multi-line:
+      // one rule per line, positioned exactly under that line. The rule colour + alpha
+      // mirror the text fill (same `0x${hex}@${a}`). `t=fill` makes the box solid.
+      if (textOv.style.underline) {
+        const lines = textOv.text.split("\n");
+        // Per-line centre, matching the preview/export vertical block-centring (§6):
+        // block centred on boxY+boxH/2 with pitch = fontPx*lineHeight.
+        const lineHeight = textOv.style.lineHeight ?? DEFAULT_LINE_HEIGHT;
+        const centerY = L.boxY + L.boxH / 2;
+        const pitch = L.fontPx * lineHeight;
+        const firstY = centerY - ((lines.length - 1) * pitch) / 2;
+        for (let li = 0; li < lines.length; li++) {
+          const line = lines[li]!;
+          if (line.length === 0) continue; // empty line → no rule
+          const lineCenterY = firstY + li * pitch;
+          const r = underlineRule(L, textOv.style.align, lineCenterY, line, textOv.style.fontWeight);
+          if (r.width <= 0 || r.height <= 0) continue;
+          const ulOut = `vtext${n}`;
+          parts.push(
+            `[${current}]drawbox=x=${r.x}:y=${r.y}:w=${r.width}:h=${r.height}:` +
+              `color=0x${hex}@${a}:t=fill:enable='between(t,${startSec},${endSec})'[${ulOut}]`,
+          );
+          current = ulOut;
+          n += 1;
+        }
+      }
     }
   }
 

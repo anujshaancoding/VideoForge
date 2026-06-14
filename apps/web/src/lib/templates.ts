@@ -355,7 +355,7 @@ export function isPlaceholderClip(project: Project, manifest: TemplateManifest, 
  * that bug was fixed can still export. New writes only ever use the fields below.
  */
 const ALLOWED_TEXT_STYLE_KEYS = new Set<string>([
-  "fontFamily", "fontSize", "fontWeight", "italic", "color", "gradient",
+  "fontFamily", "fontSize", "fontWeight", "italic", "underline", "color", "gradient",
   "align", "lineHeight", "letterSpacing", "outline", "shadow", "backgroundColor",
 ]);
 

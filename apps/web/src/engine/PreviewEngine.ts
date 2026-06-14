@@ -27,7 +27,7 @@ import type { Clip, Project, TextOverlay, ImageOverlay, Keyframe } from "@videof
 // Shared text-overlay layout — the ONE percent→pixel/size/floor/outline-scale formula
 // the FFmpeg export also consumes, so preview geometry == export drawtext (§7.5).
 // `weightToInterFile` is export-only; preview keeps the CSS `Inter` family.
-import { layoutTextOverlay, weightToInterFace, DEFAULT_LINE_HEIGHT } from "@videoforge/project-schema";
+import { layoutTextOverlay, weightToInterFace, underlineRule, DEFAULT_LINE_HEIGHT } from "@videoforge/project-schema";
 
 /**
  * CSS numeric weight of the bundled Inter face a numeric weight buckets into.
@@ -942,14 +942,28 @@ export class PreviewEngine {
           // (spec §6.2/R6) — and vertically centre the whole block on the box mid-line
           // using line pitch = fontPx * DEFAULT_LINE_HEIGHT (1.2). For a single line
           // this is identical to the old single-fillText at y + bh/2 (no visual change).
+          const lineHeight = style.lineHeight ?? DEFAULT_LINE_HEIGHT;
           const lines = textOv.text.split("\n");
           const centerY = L.boxY + L.boxH / 2;
-          const pitch = L.fontPx * DEFAULT_LINE_HEIGHT;
+          const pitch = L.fontPx * lineHeight;
           const firstY = centerY - ((lines.length - 1) * pitch) / 2;
           for (let i = 0; i < lines.length; i++) {
             const lineY = firstY + i * pitch;
             if (hasOutline) ctx.strokeText(lines[i]!, L.anchorX, lineY);
             ctx.fillText(lines[i]!, L.anchorX, lineY);
+          }
+          // Underline rule: drawtext can't underline, so the export draws a filled box
+          // under each line. The preview MUST draw the SAME geometry — from the SHARED
+          // `underlineRule` (which measures width via the shared Inter advance table),
+          // NOT canvas measureText — so preview == export. Drawn as a filled rect in the
+          // text colour (fillStyle is already style.color). Per-line for multi-line.
+          if (style.underline) {
+            for (let i = 0; i < lines.length; i++) {
+              if (lines[i]!.length === 0) continue;
+              const lineCenterY = firstY + i * pitch;
+              const r = underlineRule(L, style.align, lineCenterY, lines[i]!, style.fontWeight);
+              if (r.width > 0 && r.height > 0) ctx.fillRect(r.x, r.y, r.width, r.height);
+            }
           }
           ctx.textAlign = "left";
         } else if (ov.kind === "image") {

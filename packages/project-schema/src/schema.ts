@@ -169,6 +169,7 @@ export const TextStyleSchema = z
     fontSize: z.number().gt(0),
     fontWeight: z.number(),
     italic: z.boolean().optional(),
+    underline: z.boolean().optional(),
     color: hexColor,
     gradient: z
       .object({

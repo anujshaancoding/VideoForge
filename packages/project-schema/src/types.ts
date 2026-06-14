@@ -337,6 +337,12 @@ export interface TextStyle {
   fontSize: number; // logical px at canvas resolution
   fontWeight: number;
   italic?: boolean;
+  /**
+   * Underline the text. drawtext cannot underline, so the export draws a filled rule
+   * (drawbox) under each line and the preview draws the matching filled rect; both use
+   * the SHARED `underlineRule` geometry so preview == export (additive, default false).
+   */
+  underline?: boolean;
   /** Solid fill colour. */
   color: HexColor;
   /** Optional gradient fill (rasterised on export — drawtext cannot render it). */
