@@ -6,6 +6,36 @@ Format per entry: **Shipped · In-flight · Blocked · Decisions needed · Today
 
 ---
 
+### 2026-06-14 (cont.) — 🆚 Canva parity sweep — FULL BUILD-OUT (waves 1–4 shipped; remaining = gates)
+- **CEO directive:** "continue till you fill every gap from Canva, don't stop." Ran the persona fleet as a
+  continuous build loop, escalating only true gates. **7 commits**, each typecheck-green + verified at the
+  pre-existing test baseline (no new regressions).
+- **Shipped (by wave):**
+  - **Wave 1** (`65014d4`) — invariant cracks + in-scope bugs: watermark-free default, caption `force_style`
+    export parity, font lock to Inter, dead rotation controls removed, audio fade mid-clip fix, ripple
+    delete + Ctrl+Delete, track-lock button, copy/paste, format rejection, size ceilings, library
+    rename/delete, export-aspect warning, fps clamp, alert()-stub removal.
+  - **CC0 library** (`7e7840d`) — Stock tab live with generated backgrounds via the real upload pipeline
+    (invariant-safe; external content + license vetting queued).
+  - **Wave 2** (`c610653`) — keyframe interpolation (opacity both sides via shared sampler/geq expr; scale
+    left static for parity), media-library search/filter, real generated template thumbnails.
+  - **Wave 3** (`4416556`) — canvas bg-color picker, numeric X/Y/W/H transform inputs, alignment snapping;
+    timeline multi-select + marquee + group move; resumable S3 multipart upload (bounded concurrency).
+  - **Wave 4** (`0109488` + `799a772`) — volume-envelope automation (shared piecewise-linear sampler,
+    preview ramps == export `volume:eval=frame`); project versioning/restore (table + migration + routes +
+    30-min auto-version + VersionsPanel); underline-in-export via a shared Inter text-metrics subsystem
+    (drawbox rule identical on both sides) + ⌘U.
+- **Invariant posture:** every feature emits only already-exporting constructs; the WYCIWYG rule was the
+  governing constraint — where export parity wasn't achievable (keyframe scale, per-image fit) we did NOT
+  ship a lying affordance.
+- **Follow-ups for the CI gate:** caption/watermark/underline **goldens** need re-baselining when the
+  golden gate (Now #1) lands; multipart needs bucket CORS `ExposeHeaders:[ETag]` (Anchor).
+- **🔴 Remaining Canva gaps are all GATES (surfaced to CEO):** (1) 🧭 image/logo-overlay export (Phase-2
+  scope, expands the high-risk export spine — also unblocks per-image fit); (2) ⚖️ CC0 external content +
+  license vetting (Scout+Ward); (3) Script Studio v1 worker stages (blocked on the Phase-0 fidelity gate
+  per 06-05 decision); (4) the off-wedge breadth Scout advises AGAINST cloning (full effects/transitions
+  library, audio rack, Whisper AI suite, multi-format export, collaboration, mobile, WebCodecs rewrite).
+
 ### 2026-06-14 — 🆚 Canva end-to-end parity sweep (CEO-requested) — AUDITED + FIRST FIX BATCH SHIPPED
 - **CEO ask:** compare VideoForge to Canva end-to-end (import → drag-to-timeline → every editing feature →
   export), find the gaps, fix the issues, fill the gaps. Plus 3 gate decisions resolved up front:
