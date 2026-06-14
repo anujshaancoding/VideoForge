@@ -17,7 +17,11 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { create } from "zustand";
-import type { AssetRecord } from "../lib/api.js";
+import {
+  apiRenameAsset,
+  apiDeleteAsset,
+  type AssetRecord,
+} from "../lib/api.js";
 
 export type AssetKind = "video" | "audio" | "image";
 
@@ -64,6 +68,11 @@ interface AssetState {
   registerAsset: (meta: AssetMeta) => void;
   registerFromRecord: (rec: AssetRecord) => void;
   getAsset: (id: string) => AssetMeta | undefined;
+  /** Rename an asset's display filename server-side (filename is not part of the
+   *  resolved meta, so the registry is unchanged on success). */
+  renameAsset: (id: string, filename: string) => Promise<void>;
+  /** Delete an asset server-side and drop it from the local registry. */
+  deleteAsset: (id: string) => Promise<void>;
 }
 
 export const useAssetStore = create<AssetState>((set, get) => ({
@@ -73,6 +82,16 @@ export const useAssetStore = create<AssetState>((set, get) => ({
   registerFromRecord: (rec) =>
     set((s) => ({ assets: { ...s.assets, [rec.id]: metaFromRecord(rec) } })),
   getAsset: (id) => get().assets[id],
+  renameAsset: async (id, filename) => {
+    await apiRenameAsset(id, filename);
+  },
+  deleteAsset: async (id) => {
+    await apiDeleteAsset(id);
+    set((s) => {
+      const { [id]: _removed, ...rest } = s.assets;
+      return { assets: rest };
+    });
+  },
 }));
 
 /** Imperative accessor for non-React consumers (the engines). */

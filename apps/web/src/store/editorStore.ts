@@ -146,6 +146,13 @@ export interface EditorActions {
   trimClip: (clipId: string, edge: "start" | "end", newMs: number) => void;
   splitAtPlayhead: () => void;
   deleteSelected: () => void;
+  /**
+   * Ripple delete (§3.3): remove the selected (or given) media clip — and its
+   * linked-audio partner if any — then close the gap by shifting every later clip
+   * on the affected track(s) left by the removed clip's span. Undoable like every
+   * structural edit (funnels through commit()).
+   */
+  rippleDelete: (clipId?: string) => void;
   duplicateSelected: () => void;
   copySelected: () => void;
   paste: () => void;
@@ -826,6 +833,66 @@ export const useEditorStore = create<EditorStore>()(
               break;
             }
           }
+        });
+        set((s) => {
+          s.selection = { kind: null, id: null };
+        });
+      },
+
+      rippleDelete: (clipId) => {
+        const { selection } = get();
+        // Target the explicit clipId (context menu) else the selected media clip.
+        const targetId = clipId ?? (selection.kind === "clip" ? selection.id : null);
+        if (!targetId) return;
+        commit((project) => {
+          const found = findClip(project, targetId);
+          if (!found) return;
+          // The set of clips removed together (the clip + its linked-audio partner).
+          const removedIds = new Set<string>([targetId]);
+          const linkedId = found.clip.linkedClipId ?? null;
+          if (linkedId && findClip(project, linkedId)) removedIds.add(linkedId);
+
+          // Capture each removed clip's track + span BEFORE deletion so we can close
+          // the gap on the correct lane by exactly the removed clip's length.
+          const removals: Array<{ trackId: string; start: number; span: number }> = [];
+          for (const id of removedIds) {
+            const r = findClip(project, id);
+            if (r) {
+              removals.push({
+                trackId: r.track.id,
+                start: r.clip.startOnTimeline,
+                span: r.clip.endOnTimeline - r.clip.startOnTimeline,
+              });
+            }
+          }
+
+          // Remove the clip(s).
+          for (const track of project.tracks) {
+            if (!isMediaTrack(track)) continue;
+            track.clips = track.clips.filter((c) => !removedIds.has(c.id));
+          }
+
+          // Close the gap: on each affected track, shift every clip that started at or
+          // after the removed clip's start left by that removal's span. Shift its linked
+          // partner too is handled implicitly because the partner lives on its own track
+          // and is shifted by that track's own removal record.
+          for (const removal of removals) {
+            const track = project.tracks.find((t) => t.id === removal.trackId);
+            if (!track || !isMediaTrack(track)) continue;
+            for (const c of track.clips) {
+              if (c.startOnTimeline >= removal.start) {
+                const span = c.endOnTimeline - c.startOnTimeline;
+                const ns = Math.max(0, c.startOnTimeline - removal.span);
+                c.startOnTimeline = ns;
+                c.endOnTimeline = ns + span;
+              }
+            }
+          }
+
+          // Drop any transition that referenced a removed clip.
+          project.transitions = project.transitions.filter(
+            (t) => !removedIds.has(t.fromClipId) && !removedIds.has(t.toClipId),
+          );
         });
         set((s) => {
           s.selection = { kind: null, id: null };

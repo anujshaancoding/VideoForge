@@ -43,7 +43,7 @@ describe("api client request headers", () => {
 
   it("DOES set application/json when a body is sent (presign)", async () => {
     const fetchMock = mockFetch({ assetId: "x", uploadUrl: "http://u", expiresAt: "" });
-    await apiPresign({ filename: "a.mp4", fileSize: 10, contentType: "video/mp4", md5Hash: "h" });
+    await apiPresign({ filename: "a.mp4", fileSize: 10, contentType: "video/mp4", contentHash: "h" });
     const [, init] = fetchMock.mock.calls[0]!;
     expect((init as RequestInit).body).toBeTruthy();
     expect(headersOf(init as RequestInit)["Content-Type"]).toBe("application/json");

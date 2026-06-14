@@ -229,6 +229,7 @@ describe('POST /api/v1/projects with an optional document', () => {
         muted: false,
         solo: false,
         locked: false,
+        hidden: false,
         clips: [],
       })),
     };

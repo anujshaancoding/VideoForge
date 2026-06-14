@@ -89,7 +89,7 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
   const [captions, setCaptions] = useState<CaptionMode>(hasCaptions ? 'burn' : 'none');
   const [sidecarFmt, setSidecarFmt] = useState<'.srt' | '.vtt'>('.srt');
 
-  // Snapshot first-session at open so the watermark disclosure + TTFE event stay
+  // Snapshot first-session at open so the TTFE (time-to-first-export) event stays
   // consistent for THIS export even after the flag is cleared on download. Re-read each
   // time the modal opens (a creator's very first export only — clears on download).
   const [firstSession, setFirstSession] = useState(false);
@@ -133,6 +133,12 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
 
   const sizeMb = estimateSizeMb(dims.w, dims.h, fps, durationMs);
   const overCap = Math.min(project.canvas.width, project.canvas.height) > 1080;
+
+  // Export-vs-canvas aspect mismatch (parity caveat): the preview only ever renders
+  // the project canvas aspect, so picking a preset whose aspect differs silently
+  // exports a differently-framed video (letterbox/crop, shifted text). A non-'custom'
+  // preset key ('9:16'|'16:9'|'1:1') is directly comparable to canvas.aspectRatio.
+  const aspectMismatch = preset !== 'custom' && preset !== project.canvas.aspectRatio;
 
   // Editor actions used to deep-link a preflight blocker to the broken item.
   const select = useEditorStore((s) => s.select);
@@ -231,7 +237,9 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
           // (.srt or .vtt) next to the MP4. Only meaningful for captions==='sidecar';
           // harmless extra field otherwise (the graph ignores it).
           ...(effectiveCaptions === 'sidecar' ? { sidecarFmt } : {}),
-          watermark: true,
+          // Free tier is watermark-FREE 1080p (CEO 2026-06-14). The graph honours
+          // settings.watermark; default it OFF so free exports carry no watermark.
+          watermark: false,
         },
         document,
       });
@@ -493,20 +501,8 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
 
       {phase === 'config' && (
         <>
-          {/* First-session watermark disclosure (§6.5): shown ONCE, before a creator's
-              first export, so the watermark is never a surprise on the downloaded file. */}
-          {firstSession && (
-            <div
-              data-testid="watermark-disclosure"
-              className="mb-4 flex items-start gap-2 rounded-md border border-vf-info-fg/40 bg-vf-info-bg p-3 text-2xs text-vf-text-secondary"
-            >
-              <Info className="h-3.5 w-3.5 text-vf-info-fg flex-shrink-0 mt-0.5" aria-hidden="true" />
-              <span>
-                Heads up: free-plan exports include a small VideoForge watermark in the
-                bottom-right corner. Everything else is exactly as you arranged it.
-              </span>
-            </div>
-          )}
+          {/* Free tier is watermark-FREE 1080p (CEO 2026-06-14): no watermark
+              disclosure to show — exports carry the user's edit only. */}
 
           {/* Export preflight checklist — the create→export gate. When anything here
               is unresolved, Export is DISABLED (above) and each row deep-links to the
@@ -611,6 +607,21 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
                 </div>
               </fieldset>
 
+              {aspectMismatch && (
+                <div
+                  data-testid="aspect-mismatch-warning"
+                  role="alert"
+                  className="flex items-start gap-2 rounded-md border border-vf-warning-fg/50 bg-vf-surface-2 p-3 text-2xs text-vf-text-secondary"
+                >
+                  <Info className="h-3.5 w-3.5 text-vf-warning-fg flex-shrink-0 mt-0.5" aria-hidden="true" />
+                  <span>
+                    Export aspect ({preset}) differs from your canvas ({project.canvas.aspectRatio}) —
+                    letterboxing/cropping will be applied. Your preview shows the canvas aspect, so the
+                    exported framing will differ.
+                  </span>
+                </div>
+              )}
+
               <div className="flex items-center justify-between">
                 <span className="text-xs text-vf-text-secondary">Format</span>
                 <span className="text-xs text-vf-text-tertiary">MP4 · H.264</span>
@@ -640,13 +651,6 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
                   ))}
                 </select>
               </label>
-
-              {!firstSession && (
-                <div className="flex items-start gap-2 rounded-md border border-vf-border-subtle bg-vf-surface-2 p-3 text-2xs text-vf-text-secondary">
-                  <Info className="h-3.5 w-3.5 text-vf-info-fg flex-shrink-0 mt-0.5" aria-hidden="true" />
-                  <span>A small VideoForge watermark is added to exports on the free plan (bottom-right).</span>
-                </div>
-              )}
 
               {overCap && (
                 <p className="text-2xs text-vf-text-tertiary">Canvas exceeds 1080p — export will be scaled down.</p>

@@ -741,27 +741,9 @@ function OverlayInspector({ overlay }: { overlay: OverlayClip }) {
           </div>
         </div>
 
-        {/* F05: Font family selector (searchable list of common fonts) */}
-        <div className="flex items-center gap-2">
-          <label className="w-24 shrink-0 text-xs text-vf-text-secondary">Font</label>
-          <select
-            value={t.style.fontFamily || "Inter"}
-            onChange={(e) => patchStyle({ fontFamily: e.target.value })}
-            className="h-7 flex-1 rounded-sm border border-vf-border-default bg-vf-surface-2 px-1 text-xs text-vf-text-primary"
-            aria-label="Font family"
-          >
-            {[
-              "Inter", "Roboto", "Open Sans", "Lato", "Montserrat", "Oswald", "Raleway",
-              "Poppins", "Playfair Display", "Merriweather", "Source Sans Pro", "Ubuntu",
-              "Nunito", "PT Sans", "Roboto Slab", "Bebas Neue", "Anton", "Pacifico",
-              "Dancing Script", "Caveat",
-            ].map((f) => (
-              <option key={f} value={f} style={{ fontFamily: f }}>
-                {f}
-              </option>
-            ))}
-          </select>
-        </div>
+        {/* Font-family picker removed (invariant): the export always rasterizes the
+            bundled Inter face (R1) — offering other families would preview a font the
+            export can't honor. Text always renders Inter on both sides. */}
 
         <Slider label="Opacity" value={Math.round(t.opacity)} min={0} max={100} valueLabel={`${t.opacity}%`} onChange={(v) => updateOverlay(t.id, { opacity: v })} />
         <p className="text-2xs text-vf-text-tertiary">ⓘ Styles shown here render identically in your export (no server rasterization).</p>
@@ -769,7 +751,8 @@ function OverlayInspector({ overlay }: { overlay: OverlayClip }) {
       <Section title="Properties (transform)">
         <Slider label="Position X" value={Math.round(t.canvasX ?? 0)} min={0} max={100} valueLabel={`${(t.canvasX ?? 0).toFixed(0)}%`} onChange={(v) => updateOverlay(t.id, { canvasX: v })} />
         <Slider label="Position Y" value={Math.round(t.canvasY ?? 0)} min={0} max={100} valueLabel={`${(t.canvasY ?? 0).toFixed(0)}%`} onChange={(v) => updateOverlay(t.id, { canvasY: v })} />
-        <Slider label="Rotation" value={Math.round(t.rotation ?? 0)} min={-180} max={180} valueLabel={`${(t.rotation ?? 0).toFixed(0)}°`} onChange={(v) => updateOverlay(t.id, { rotation: v })} />
+        {/* Rotation slider removed (invariant): neither the preview nor the export
+            honors TextOverlay.rotation, so the control was a dead/lying affordance. */}
       </Section>
     </>
   );

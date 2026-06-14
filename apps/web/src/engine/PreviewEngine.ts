@@ -27,7 +27,20 @@ import type { Clip, Project, TextOverlay, ImageOverlay } from "@videoforge/proje
 // Shared text-overlay layout — the ONE percent→pixel/size/floor/outline-scale formula
 // the FFmpeg export also consumes, so preview geometry == export drawtext (§7.5).
 // `weightToInterFile` is export-only; preview keeps the CSS `Inter` family.
-import { layoutTextOverlay, DEFAULT_LINE_HEIGHT } from "@videoforge/project-schema";
+import { layoutTextOverlay, weightToInterFace, DEFAULT_LINE_HEIGHT } from "@videoforge/project-schema";
+
+/**
+ * CSS numeric weight of the bundled Inter face a numeric weight buckets into.
+ * Keyed on weightToInterFace() (the export's single source of truth) so the preview
+ * canvas snaps to the SAME Inter face the export selects — no preview≠export drift.
+ */
+const INTER_FACE_CSS_WEIGHT: Record<string, number> = {
+  Regular: 400,
+  Medium: 500,
+  SemiBold: 600,
+  Bold: 700,
+  ExtraBold: 800,
+};
 import { getAssetMeta } from "../store/assetStore.js";
 import { ColorGrader } from "./ColorGrader.js";
 import { useEditorStore } from "../store/editorStore.js";
@@ -825,12 +838,18 @@ export class PreviewEngine {
           const L = layoutTextOverlay(textOv, w, h, project.canvas.height);
           ctx.fillStyle = style.color || "#FFFFFF";
           const s: any = style || {};
-          const family = s.fontFamily || "Inter";
-          const weight = s.fontWeight || 600;
+          // R1 premise: the export ALWAYS rasterizes bundled Inter (font-family is
+          // not configurable server-side), so the preview MUST render Inter too — any
+          // other family would be a preview≠export lie. The picker is removed from the
+          // inspector; we hard-lock the canvas to Inter here regardless of any stored
+          // legacy fontFamily value.
+          // Snap the numeric weight through the SAME bucketing the export uses
+          // (weightToInterFace) so both sides pick the identical Inter face.
+          const cssWeight = INTER_FACE_CSS_WEIGHT[weightToInterFace(s.fontWeight || 600)] ?? 600;
           // Italic reads the §18 TextStyle field — the SAME field the export's
           // weightToInterFile() consumes — so preview and export never disagree.
           const italic = s.italic === true ? "italic " : "";
-          ctx.font = `${italic}${weight} ${L.fontPx}px ${family}, Inter, system-ui, sans-serif`;
+          ctx.font = `${italic}${cssWeight} ${L.fontPx}px Inter, system-ui, sans-serif`;
           ctx.textAlign =
             style.align === "right" ? "right" : style.align === "left" ? "left" : "center";
           ctx.textBaseline = "middle";

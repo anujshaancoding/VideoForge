@@ -108,6 +108,7 @@ export default function Timeline() {
   const setTrackMute = useEditorStore((s) => s.setTrackMute);
   const setTrackSolo = useEditorStore((s) => s.setTrackSolo);
   const setTrackHidden = useEditorStore((s) => (s as any).setTrackHidden);
+  const setTrackLocked = useEditorStore((s) => s.setTrackLocked);
   const moveTrack = useEditorStore((s) => (s as any).moveTrack);
   const replaceClipAsset = useEditorStore((s) => s.replaceClipAsset);
   const addCrossfade = useEditorStore((s) => s.addCrossfade);
@@ -542,6 +543,7 @@ export default function Timeline() {
               onMute={(v) => setTrackMute(track.id, v)}
               onSolo={(v) => setTrackSolo(track.id, v)}
               onHidden={(v) => setTrackHidden && setTrackHidden(track.id, v)}
+              onLock={(v) => setTrackLocked(track.id, v)}
               onContextMenu={(x, y) => {
                 select("track", track.id);
                 setTrackCtx({ trackId: track.id, x, y });
@@ -749,39 +751,6 @@ export default function Timeline() {
           >
             Delete (Delete)
           </button>
-          {/* Added to match Canva context menu items with hints */}
-          <button
-            role="menuitem"
-            type="button"
-            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs text-vf-text-primary hover:bg-vf-surface-4"
-            onClick={() => { alert("Add transition (would open transition picker like Canva)"); setClipCtx(null); }}
-          >
-            Add transition
-          </button>
-          <button
-            role="menuitem"
-            type="button"
-            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs text-vf-text-primary hover:bg-vf-surface-4"
-            onClick={() => { alert("Comment added (stub - would open comment UI ⌥⌘N)"); setClipCtx(null); }}
-          >
-            Comment (⌥⌘N)
-          </button>
-          <button
-            role="menuitem"
-            type="button"
-            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs text-vf-text-primary hover:bg-vf-surface-4"
-            onClick={() => { alert("Lock background (stub ⌥⇧L)"); setClipCtx(null); }}
-          >
-            Lock background (⌥⇧L)
-          </button>
-          <button
-            role="menuitem"
-            type="button"
-            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs text-vf-text-primary hover:bg-vf-surface-4"
-            onClick={() => { alert("Info (stub)"); setClipCtx(null); }}
-          >
-            Info
-          </button>
         </div>
       )}
 
@@ -885,6 +854,7 @@ function TrackHeader({
   onMute,
   onSolo,
   onHidden,
+  onLock,
   onContextMenu,
 }: {
   track: Track;
@@ -893,6 +863,7 @@ function TrackHeader({
   onMute: (v: boolean) => void;
   onSolo: (v: boolean) => void;
   onHidden?: (v: boolean) => void;
+  onLock?: (v: boolean) => void;
   onContextMenu: (x: number, y: number) => void;
 }) {
   const isAudio = track.type === "audio" || track.type === "voiceover";
@@ -962,6 +933,16 @@ function TrackHeader({
             onClick={(e) => { e.stopPropagation(); onHidden && onHidden(!hidden); }}
           >
             {hidden ? <Eye className="h-4 w-4" aria-hidden="true" /> : <EyeOff className="h-4 w-4" aria-hidden="true" />}
+          </IconButton>
+        </Tooltip>
+        <Tooltip label={locked ? "Unlock track" : "Lock track"}>
+          <IconButton
+            aria-label={`${locked ? "Unlock" : "Lock"} ${track.name}`}
+            size="lg"
+            active={locked}
+            onClick={(e) => { e.stopPropagation(); onLock && onLock(!locked); }}
+          >
+            <Lock className="h-4 w-4" aria-hidden="true" />
           </IconButton>
         </Tooltip>
       </div>

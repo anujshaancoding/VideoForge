@@ -313,46 +313,10 @@ export default function CanvasStage() {
     window.addEventListener("pointerup", onUp);
   }
 
-  // ── Rotate direct manipulation (top handle) ────────────────────────────────
-  function beginRotate(e: React.PointerEvent): void {
-    if (!selectedClip) return;
-    e.preventDefault();
-    e.stopPropagation();
-    const vp = viewportRef.current;
-    if (!vp) return;
-    const rect = vp.getBoundingClientRect();
-    const cx = rect.left + rect.width / 2;
-    const cy = rect.top + rect.height / 2;
-    const clip = selectedClip;
-    const startRot = ((clip as any).transform?.rotation ?? (clip as any).rotation ?? 0);
-    const startAngle = Math.atan2(e.clientY - cy, e.clientX - cx) * (180 / Math.PI);
-
-    const onMove = (ev: PointerEvent): void => {
-      const ang = Math.atan2(ev.clientY - cy, ev.clientX - cx) * (180 / Math.PI);
-      let rot = startRot + (ang - startAngle);
-      rot = Math.round(rot / 15) * 15; // 15° snap for usability
-      // Live update via temp on the element style (simple, no extra state)
-      const boxEl = (ev.target as HTMLElement).parentElement;
-      if (boxEl) boxEl.style.transform = `rotate(${rot}deg)`;
-    };
-    const onUp = (ev: PointerEvent): void => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-      const ang = Math.atan2(ev.clientY - cy, ev.clientX - cx) * (180 / Math.PI);
-      let rot = startRot + (ang - startAngle);
-      rot = Math.round(rot / 15) * 15;
-      const current = clip.transform ?? FULL_FRAME;
-      setClipTransform(clip.id, clip.trackId, {
-        ...current,
-        rotation: rot,
-      } as any);
-      // reset any temp
-      const boxEl = (ev.target as HTMLElement).parentElement;
-      if (boxEl) boxEl.style.transform = `rotate(${rot}deg)`;
-    };
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-  }
+  // Rotate direct-manipulation removed (invariant): the export emits no rotate filter
+  // (clip rotation is deferred), so offering a rotate handle / applying rotate(...) in
+  // the preview would show a rotation the export won't honor. The schema field stays;
+  // only the UI affordance + preview application are removed.
 
   // ── Drag a media asset from the gallery onto the canvas → PiP overlay ──────
   const onCanvasDragOver = (e: React.DragEvent): void => {
@@ -530,9 +494,7 @@ export default function CanvasStage() {
             items.push({ label: "Split at playhead", onClick: () => useEditorStore.getState().splitAtPlayhead(), shortcut: "S" } as any);
             items.push({ label: "Bring forward", onClick: () => useEditorStore.getState().moveClipLayer?.(sel.id!, "forward") });
             items.push({ label: "Send backward", onClick: () => useEditorStore.getState().moveClipLayer?.(sel.id!, "backward") });
-            items.push({ label: "Add transition", onClick: () => alert("Add transition stub (like Canva)") });
-            items.push({ label: "Comment (⌥⌘N)", onClick: () => alert("Comment stub") });
-            items.push({ label: "Info", onClick: () => alert("Info stub") });
+            // Add transition / Comment / Info stubs removed: out-of-MVP alert() placeholders.
           }
           if (cb) {
             items.push({ label: "Paste (⌘V)", onClick: () => useEditorStore.getState().paste() });
@@ -601,7 +563,9 @@ export default function CanvasStage() {
                 height: `${foundOv.height || Math.max(8, (baseFont / 1920) * 100 * 1.4)}%`,
                 fontSize: `${fontSize}px`,
                 fontWeight: style.fontWeight || 600,
-                fontFamily: style.fontFamily || "Inter, system-ui, sans-serif",
+                // Hard-locked to Inter (invariant): the canvas + export both render
+                // bundled Inter, so the inline editor must too to stay WYSIWYG.
+                fontFamily: "Inter, system-ui, sans-serif",
                 fontStyle: style.italic ? "italic" : "normal",
                 color: textColor,
                 caretColor: textColor,
@@ -653,8 +617,9 @@ export default function CanvasStage() {
           </>
         )}
 
-        {/* On-canvas transform box for the selected clip (move + resize + rotate → PiP).
-            Deeper direct manipulation per review (rotate + guides). */}
+        {/* On-canvas transform box for the selected clip (move + resize → PiP).
+            No rotate handle / rotate(...) transform: the export does not honor clip
+            rotation, so the preview must render the box un-rotated (invariant). */}
         {selectedClip && (
           <div
             data-testid="canvas-transform-box"
@@ -666,8 +631,6 @@ export default function CanvasStage() {
               height: `${box.height}%`,
               cursor: "move",
               touchAction: "none",
-              transform: `rotate(${((selectedClip as any).transform?.rotation ?? (selectedClip as any).rotation ?? 0)}deg)`,
-              transformOrigin: "center",
             }}
             onPointerDown={(e) => beginTransform(e, "move")}
           >
@@ -679,12 +642,6 @@ export default function CanvasStage() {
                 style={{ ...HANDLE_POS[h], margin: -6, touchAction: "none" }}
               />
             ))}
-            {/* Rotate handle (top center) for deeper direct manipulation */}
-            <div
-              onPointerDown={(e) => beginRotate(e)}
-              className="absolute -top-6 left-1/2 h-3 w-3 -translate-x-1/2 cursor-crosshair rounded-full border border-vf-accent bg-white"
-              title="Drag to rotate"
-            />
           </div>
         )}
 
@@ -711,13 +668,8 @@ export default function CanvasStage() {
               ["Duplicate", "Duplicate", Copy, () => duplicateSelected()],
               ["Reset size/position", "Reset", RotateCcw, () => setClipTransform(selectedClip.id, selectedClip.trackId, undefined)],
               ["Delete", "Delete", Trash2, () => deleteSelected()],
-              // Added to match Canva toolbar: context-aware stubs for missing features
-              ["Animate", "Animate", RotateCcw, () => alert("Animation presets (fade, slide, typewriter, etc.) - stub, would open picker like Canva")],
-              ["BG Remover", "Remove BG", Shield, () => alert("AI Background Remover - stub (would use AI like Canva Magic Eraser)")],
-              ["Duration", "Edit Duration", Maximize2, () => {
-                const dur = prompt("Enter new duration in seconds (stub):", "5");
-                if (dur) alert(`Duration set to ${dur}s (in real would update clip trim and speed)`);
-              }],
+              // Animate / BG Remover / Duration stubs removed: out-of-MVP features that
+              // shipped as alert()/prompt() placeholders (broken affordances).
             ] as Array<[string, string, any, () => void]>).map(([label, tip, Icon, onClick]) => (
               <Tooltip key={label} label={tip}>
                 <button

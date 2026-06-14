@@ -218,6 +218,9 @@ export default function Editor() {
   const undo = useEditorStore((s) => s.undo);
   const redo = useEditorStore((s) => s.redo);
   const deleteSelected = useEditorStore((s) => s.deleteSelected);
+  const rippleDelete = useEditorStore((s) => s.rippleDelete);
+  const copySelected = useEditorStore((s) => s.copySelected);
+  const paste = useEditorStore((s) => s.paste);
   const duplicateSelected = useEditorStore((s) => s.duplicateSelected);
   const splitAtPlayhead = useEditorStore((s) => s.splitAtPlayhead);
   const setPlayhead = useEditorStore((s) => s.setPlayhead);
@@ -258,9 +261,21 @@ export default function Editor() {
       } else if (mod && (e.code === "KeyY" || (e.code === "KeyZ" && e.shiftKey))) {
         e.preventDefault();
         redo();
+      } else if (mod && (e.key === "Delete" || e.key === "Backspace")) {
+        // Ctrl/Cmd+Delete → ripple delete (close the gap), §3.3.
+        e.preventDefault();
+        rippleDelete();
       } else if ((e.key === "Delete" || e.key === "Backspace") && !mod) {
         e.preventDefault();
         deleteSelected();
+      } else if (mod && e.code === "KeyC" && !e.shiftKey) {
+        // Ctrl/Cmd+C → copy selected clip/overlay (Shift+Cmd+C is text-align center).
+        e.preventDefault();
+        copySelected();
+      } else if (mod && e.code === "KeyV") {
+        // Ctrl/Cmd+V → paste from the in-memory clipboard.
+        e.preventDefault();
+        paste();
       } else if (mod && e.code === "KeyD") {
         // Ctrl/Cmd+D → duplicate selected
         e.preventDefault();
@@ -366,18 +381,6 @@ export default function Editor() {
         // Cmd+/ → toggle left sidebar (media panel or close)
         e.preventDefault();
         setLeftRailTab(leftRailTab ? null : 'media');
-      } else if (mod && e.code === "KeyF") {
-        // Cmd+F → find & replace stub (would search text overlays)
-        e.preventDefault();
-        alert("Find & replace stub — would search/replace text in overlays and captions (like Canva).");
-      } else if (mod && e.code === "KeyG") {
-        // Cmd+G → group stub (would group selected overlays/clips)
-        e.preventDefault();
-        alert("Group elements stub (Cmd+G) — would group selected items for easier manipulation (like Canva).");
-      } else if (e.code === "KeyR" && !mod) {
-        // R → add rectangle/shape stub (Elements SOON)
-        e.preventDefault();
-        alert("R - Add rectangle / shape (stub — Elements panel coming soon, would add overlay shape at playhead).");
       } else if (mod && (e.code === "KeyB" || e.code === "KeyI")) {
         // Cmd+B/I text formatting — toggle on selected text overlay (F06). We only
         // ever write §18-valid TextStyle fields (fontWeight, italic) so the document
@@ -435,6 +438,9 @@ export default function Editor() {
       undo,
       redo,
       deleteSelected,
+      rippleDelete,
+      copySelected,
+      paste,
       duplicateSelected,
       splitAtPlayhead,
       setPlayhead,

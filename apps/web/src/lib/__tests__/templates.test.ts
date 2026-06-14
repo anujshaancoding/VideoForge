@@ -238,8 +238,8 @@ describe("buildExportDocument (export preflight snapshot)", () => {
       if (t.type !== "overlay") continue;
       for (const ov of t.clips) {
         if (ov.kind === "text") {
-          (ov.style as Record<string, unknown>)["fontStyle"] = "italic";
-          (ov.style as Record<string, unknown>)["textDecoration"] = "underline";
+          (ov.style as unknown as Record<string, unknown>)["fontStyle"] = "italic";
+          (ov.style as unknown as Record<string, unknown>)["textDecoration"] = "underline";
           n++;
         }
       }

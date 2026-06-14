@@ -3,13 +3,13 @@ import { useEditorStore } from '../../store/editorStore.js';
 import { useAssetStore, getAssetMeta, kindFromContentType } from '../../store/assetStore.js';
 import { Button, cx, Tooltip } from '../ui/index.js';
 import type { Track, CaptionBlock } from '@videoforge/project-schema';
-import { apiPresign, apiUploadToS3, apiConfirmUpload, apiGetAsset, apiPollAssetReady, fileHash, type AssetRecord } from '../../lib/api.js';
+import { apiPresign, apiUploadToS3, apiConfirmUpload, apiGetAsset, apiPollAssetReady, fileHash, isAcceptedFormat, SIZE_LIMITS, formatBytes, type AssetRecord } from '../../lib/api.js';
 import { wsClient } from '../../lib/wsClient.js';
 import { readViewPrefs, writeViewPrefs } from '../../lib/viewPrefs.js';
 import { parseCaptions } from '../../lib/captions.js';
 import { resolveManifest } from '../../store/templateStore.js';
 import { isSlotFilled } from '../../lib/templates.js';
-import { Image, Type, Captions, Package, Shapes, Sparkles, ChevronLeft, Upload, Music, AlertTriangle } from 'lucide-react';
+import { Image, Type, Captions, Package, Shapes, Sparkles, ChevronLeft, Upload, Music, AlertTriangle, Pencil, Trash2 } from 'lucide-react';
 
 // MediaPanel — left rail (§7.A). Three-section rail: Media / Text / Captions.
 // "Import media" does the full real S3 upload flow (presign → PUT → confirm →
@@ -74,6 +74,8 @@ export default function MediaPanel() {
   const addTextOverlay = useEditorStore((s) => s.addTextOverlay);
   const importCaptions = useEditorStore((s) => s.importCaptions);
   const registerFromRecord = useAssetStore((s) => s.registerFromRecord);
+  const renameAssetMeta = useAssetStore((s) => s.renameAsset);
+  const deleteAssetMeta = useAssetStore((s) => s.deleteAsset);
   const replaceClipAsset = useEditorStore((s) => s.replaceClipAsset);
 
   // Seed the left-rail view prefs (active tab + collapsed) from localStorage so the
@@ -136,7 +138,11 @@ export default function MediaPanel() {
         const target = prev.find((a) => a.id === assetId);
         // Ignore events for assets not in our library, or already settled.
         if (!target || target.status === 'ready' || target.status === 'error') return prev;
-        // Optimistically flip to ready now; fetch the full record for URLs/duration.
+        // Do NOT flip to 'ready' synchronously: the card only becomes draggable/playable
+        // once apiGetAsset registers the asset meta (proxyUrl/duration) in assetStore.
+        // Flipping early would present an "unplayable ready" card if the fetch is slow or
+        // fails. Fetch first, then flip on success; on failure stay 'processing' (the
+        // HTTP poll in uploadFile() remains the source of truth / retry path).
         void apiGetAsset(assetId)
           .then((rec) => {
             registerFromRecord(rec);
@@ -148,9 +154,9 @@ export default function MediaPanel() {
             });
           })
           .catch(() => {
-            // The poll in uploadFile() remains the source of truth on fetch failure.
+            // Keep 'processing'; the uploadFile() poll will settle the card (ready or error).
           });
-        return prev.map((a) => (a.id === assetId ? { ...a, status: 'ready' } : a));
+        return prev;
       });
     });
     return off;
@@ -225,21 +231,42 @@ export default function MediaPanel() {
       const kind = kindFromMime(file.type);
       const tempId = crypto.randomUUID();
 
+      // Pre-flight client-side guards (§3.1): reject unsupported formats and files
+      // over the per-kind ceiling BEFORE hashing/presign/upload, with a friendly,
+      // self-explaining error card (the server re-validates with 415/413 anyway).
+      if (!isAcceptedFormat(file.type, file.name)) {
+        setAssets((prev) => [
+          ...prev,
+          { id: tempId, name: file.name, kind, duration: '—', status: 'error', proxyUrl: null, thumbnailUrl: null,
+            errorMsg: 'Format not supported. Use MP4/MOV, MP3/WAV/AAC, or JPG/PNG.' },
+        ]);
+        return;
+      }
+      const sizeLimit = SIZE_LIMITS[kind];
+      if (file.size > sizeLimit) {
+        setAssets((prev) => [
+          ...prev,
+          { id: tempId, name: file.name, kind, duration: '—', status: 'error', proxyUrl: null, thumbnailUrl: null,
+            errorMsg: `Too large — ${kind} files must be under ${formatBytes(sizeLimit)}.` },
+        ]);
+        return;
+      }
+
       setAssets((prev) => [
         ...prev,
         { id: tempId, name: file.name, kind, duration: kind==='image' ? '0:05' : '?:??', status: 'uploading', progress: 0, proxyUrl: null, thumbnailUrl: null, file },
       ]);
 
       try {
-        // 1. Compute hash for dedup
-        const md5Hash = await fileHash(file);
+        // 1. Compute content hash for dedup
+        const contentHash = await fileHash(file);
 
         // 2. Presign (or get existingAssetId on dedup)
         const presign = await apiPresign({
           filename: file.name,
           contentType: file.type,
           fileSize: file.size,
-          md5Hash,
+          contentHash,
         });
 
         if (presign.existingAssetId) {
@@ -276,7 +303,7 @@ export default function MediaPanel() {
         updateAsset(assetId, {
           name: file.name,
           status: 'ready',
-          duration: durationLabel(ready.durationMs),
+          duration: durationLabel(ready.durationMs, kindFromContentType(ready.contentType)),
           proxyUrl: ready.proxyUrl,
           thumbnailUrl: ready.thumbnailUrl,
         });
@@ -312,9 +339,10 @@ export default function MediaPanel() {
     (e: React.DragEvent) => {
       e.preventDefault();
       setDragOver(false);
-      const files = Array.from(e.dataTransfer.files ?? []).filter(
-        (f) => f.type.startsWith('video/') || f.type.startsWith('audio/') || f.type.startsWith('image/'),
-      );
+      // Pass ALL dropped files through uploadFile, which validates format/size and
+      // surfaces a clear "format not supported" / "too large" error card for any
+      // rejected file (rather than silently swallowing it as the old MIME filter did).
+      const files = Array.from(e.dataTransfer.files ?? []);
       if (files.length) void Promise.all(files.map(uploadFile));
     },
     [uploadFile],
@@ -328,6 +356,61 @@ export default function MediaPanel() {
       void uploadFile(asset.file);
     },
     [uploadFile],
+  );
+
+  // Library rename (§3.1). Prompt for a new filename, PATCH it, reflect locally.
+  // Seed-only assets (derived from timeline clips, not real uploads) have no server
+  // record to rename, so we update just the local label for them.
+  const handleRenameAsset = useCallback(
+    async (asset: MediaAsset) => {
+      const next = window.prompt('Rename media', asset.name)?.trim();
+      if (!next || next === asset.name) return;
+      const isLibraryUpload = assets.some((a) => a.id === asset.id);
+      if (isLibraryUpload) {
+        try {
+          await renameAssetMeta(asset.id, next);
+        } catch {
+          return; // leave the label unchanged on failure
+        }
+      }
+      updateAsset(asset.id, { name: next });
+    },
+    [assets, renameAssetMeta, updateAsset],
+  );
+
+  // Library delete (§3.1) with an in-use warning: if any timeline clip references
+  // this asset (sourceAssetId === asset.id), warn before deleting (deleting leaves
+  // those clips pointing at a now-missing asset).
+  const handleDeleteAsset = useCallback(
+    async (asset: MediaAsset) => {
+      const proj = useEditorStore.getState().project;
+      const inUse = proj.tracks.some(
+        (t) => 'clips' in t && t.clips.some((c) => 'sourceAssetId' in c && c.sourceAssetId === asset.id),
+      );
+      const message = inUse
+        ? `"${asset.name}" is used by one or more clips on the timeline. Delete it anyway? Those clips will lose their media.`
+        : `Delete "${asset.name}" from your media library?`;
+      if (!window.confirm(message)) return;
+      const isLibraryUpload = assets.some((a) => a.id === asset.id);
+      if (isLibraryUpload) {
+        try {
+          await deleteAssetMeta(asset.id);
+        } catch {
+          return; // keep the card if the server delete failed
+        }
+        // Drop from the persisted media-library id list so it stays gone on reload.
+        const pid = proj.id;
+        if (pid) {
+          const key = `vf_media_library_${pid}`;
+          try {
+            const cur: string[] = JSON.parse(localStorage.getItem(key) || '[]');
+            localStorage.setItem(key, JSON.stringify(cur.filter((id) => id !== asset.id)));
+          } catch {}
+        }
+      }
+      setAssets((prev) => prev.filter((a) => a.id !== asset.id));
+    },
+    [assets, deleteAssetMeta],
   );
 
   const handleSrtChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -538,8 +621,34 @@ export default function MediaPanel() {
           <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 pb-3 w-full">
             <div className="grid grid-cols-2 gap-2.5 w-full">
               {allAssets.map((asset) => (
+                <div key={asset.id} className="group relative">
+                {/* Hover actions (§3.1 rename/delete). Siblings of the card button — not
+                    nested — so the markup stays valid; only for settled (ready) assets. */}
+                {asset.status === 'ready' && (
+                  <div className="absolute right-1 top-1 z-10 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+                    <button
+                      type="button"
+                      aria-label={`Rename ${asset.name}`}
+                      title="Rename"
+                      data-testid="asset-rename-btn"
+                      onClick={(e) => { e.stopPropagation(); void handleRenameAsset(asset); }}
+                      className="flex h-6 w-6 items-center justify-center rounded-md bg-vf-surface-sunken/90 text-vf-text-secondary hover:bg-vf-surface-3 hover:text-vf-text-primary"
+                    >
+                      <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`Delete ${asset.name}`}
+                      title="Delete"
+                      data-testid="asset-delete-btn"
+                      onClick={(e) => { e.stopPropagation(); void handleDeleteAsset(asset); }}
+                      className="flex h-6 w-6 items-center justify-center rounded-md bg-vf-surface-sunken/90 text-vf-text-secondary hover:bg-vf-danger-fg/20 hover:text-vf-danger-fg"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                    </button>
+                  </div>
+                )}
                 <button
-                  key={asset.id}
                   type="button"
                   disabled={asset.status !== 'ready' && asset.status !== 'error'}
                   draggable={asset.status === 'ready'}
@@ -564,7 +673,7 @@ export default function MediaPanel() {
                   data-testid="asset-card"
                   title={asset.status === 'uploading' ? 'Uploading…' : asset.status === 'processing' ? 'Processing…' : asset.status === 'error' ? `${asset.errorMsg ?? 'Upload failed'} — click to retry` : asset.name}
                   className={cx(
-                    'group flex flex-col overflow-hidden min-w-0 rounded-lg border bg-vf-surface-2 text-left transition-colors',
+                    'flex w-full flex-col overflow-hidden min-w-0 rounded-lg border bg-vf-surface-2 text-left transition-colors',
                     asset.status === 'ready' && 'cursor-grab border-vf-border-subtle hover:border-vf-border-strong',
                     asset.status === 'error' && 'cursor-pointer border-vf-danger-fg/40 hover:border-vf-danger-fg',
                     (asset.status === 'uploading' || asset.status === 'processing') && 'cursor-default border-vf-border-subtle',
@@ -617,6 +726,7 @@ export default function MediaPanel() {
                     </span>
                   </div>
                 </button>
+                </div>
               ))}
             </div>
             {allAssets.length === 0 && (
@@ -638,7 +748,7 @@ export default function MediaPanel() {
                 <Upload className="h-8 w-8 text-vf-text-tertiary" aria-hidden="true" />
                 <span className="text-sm font-medium text-vf-text-primary">Drop a video here</span>
                 <span className="text-2xs text-vf-text-tertiary">or click Import media above</span>
-                <span className="text-2xs text-vf-text-tertiary">MP4 · MOV · MKV · MP3 · WAV</span>
+                <span className="text-2xs text-vf-text-tertiary">MP4 · MOV · MP3 · WAV · AAC · JPG · PNG</span>
               </button>
             )}
           </div>
@@ -719,7 +829,7 @@ export default function MediaPanel() {
       <input
         ref={fileInputRef}
         type="file"
-        accept="video/*,audio/*,image/*"
+        accept=".mp4,.mov,.mp3,.wav,.aac,.m4a,.jpg,.jpeg,.png,video/mp4,video/quicktime,audio/mpeg,audio/wav,audio/aac,audio/mp4,image/jpeg,image/png"
         multiple
         aria-hidden="true"
         aria-label="Import video, audio or image files"

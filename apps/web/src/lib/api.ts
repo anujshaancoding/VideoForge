@@ -261,6 +261,67 @@ export async function apiDuplicateProject(id: string): Promise<ApiProject> {
   return request<ApiProject>(`/projects/${id}/duplicate`, { method: 'POST' });
 }
 
+// ── Accepted formats + size ceilings (MVP §3.1) ─────────────────────────────────
+// Single decode path: MP4/MOV (H.264), MP3/WAV/AAC, JPG/PNG only. Everything else
+// (H.265/MKV/AVI/…) is rejected up-front rather than presigned + uploaded then
+// failed late in the worker. Mirrored server-side in /presign (415 / 413).
+
+export type MediaKindLabel = 'video' | 'audio' | 'image';
+
+/** Accepted MIME content-types. Some browsers emit variant audio MIMEs, so the
+ *  audio set is intentionally broad within the WAV/MP3/AAC family. */
+export const ACCEPTED_MIME = new Set<string>([
+  // video — MP4 / MOV containers (H.264)
+  'video/mp4',
+  'video/quicktime',
+  // audio — MP3 / WAV / AAC
+  'audio/mpeg',
+  'audio/mp3',
+  'audio/wav',
+  'audio/x-wav',
+  'audio/wave',
+  'audio/aac',
+  'audio/mp4',
+  'audio/x-m4a',
+  'audio/m4a',
+  // image — JPG / PNG
+  'image/jpeg',
+  'image/png',
+]);
+
+/** Accepted file extensions (fallback when the browser supplies no/empty MIME). */
+export const ACCEPTED_EXTENSIONS = new Set<string>([
+  '.mp4', '.mov',
+  '.mp3', '.wav', '.aac', '.m4a',
+  '.jpg', '.jpeg', '.png',
+]);
+
+/** Per-kind upload ceilings (bytes): 20 GB video / 2 GB audio / 100 MB image. */
+export const SIZE_LIMITS: Record<MediaKindLabel, number> = {
+  video: 20 * 1024 * 1024 * 1024,
+  audio: 2 * 1024 * 1024 * 1024,
+  image: 100 * 1024 * 1024,
+};
+
+function extOf(filename: string): string {
+  const dot = filename.lastIndexOf('.');
+  return dot >= 0 ? filename.slice(dot).toLowerCase() : '';
+}
+
+/** True when the (contentType, filename) pair is an accepted MVP input format. */
+export function isAcceptedFormat(contentType: string, filename: string): boolean {
+  if (contentType && ACCEPTED_MIME.has(contentType.toLowerCase())) return true;
+  return ACCEPTED_EXTENSIONS.has(extOf(filename));
+}
+
+/** Human-readable byte size, for friendly limit messages. */
+export function formatBytes(bytes: number): string {
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(bytes % 1024 ** 3 === 0 ? 0 : 1)} GB`;
+  if (bytes >= 1024 ** 2) return `${Math.round(bytes / 1024 ** 2)} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${bytes} B`;
+}
+
 // ── Asset API ─────────────────────────────────────────────────────────────────
 
 export interface PresignResponse {
@@ -290,9 +351,23 @@ export async function apiPresign(body: {
   filename: string;
   contentType: string;
   fileSize: number;
-  md5Hash: string | null;
+  /** Workspace dedup hash (SHA-256 hex). Renamed from the misleading `md5Hash`. */
+  contentHash: string | null;
 }): Promise<PresignResponse> {
   return request<PresignResponse>('/assets/presign', { method: 'POST', body: JSON.stringify(body) });
+}
+
+/** Rename an asset's display filename. */
+export async function apiRenameAsset(assetId: string, filename: string): Promise<AssetRecord> {
+  return request<AssetRecord>(`/assets/${assetId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ filename }),
+  });
+}
+
+/** Delete an asset (and its S3 objects) from the workspace. */
+export async function apiDeleteAsset(assetId: string): Promise<void> {
+  await request(`/assets/${assetId}`, { method: 'DELETE' });
 }
 
 /**
@@ -397,9 +472,10 @@ export async function apiPollExportComplete(
   throw new Error(`Export ${exportId} did not complete within timeout`);
 }
 
-// ── MD5 helper (browser) ──────────────────────────────────────────────────────
+// ── Content-hash helper (browser) ──────────────────────────────────────────────
 
-/** Compute MD5 hex of a File using SubtleCrypto (SHA-256 proxy for dedup — close enough for MVP). */
+/** Compute the SHA-256 hex content hash of a File via SubtleCrypto, used as the
+ *  workspace dedup key (sent to /presign as `contentHash`). */
 export async function fileHash(file: File): Promise<string> {
   const buf = await file.arrayBuffer();
   const hashBuf = await crypto.subtle.digest('SHA-256', buf);

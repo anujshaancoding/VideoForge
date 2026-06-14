@@ -184,16 +184,45 @@ export class AudioEngine {
     const fadeOutSec = (clip.fadeOutMs ?? 0) / 1000;
 
     clipGain.gain.cancelScheduledValues(startAt);
-    if (fadeInSec > 0 && fromMs <= clip.startOnTimeline) {
-      clipGain.gain.setValueAtTime(0, startAt);
-      clipGain.gain.linearRampToValueAtTime(baseGain, startAt + Math.min(fadeInSec, wallDur));
+
+    // Timeline-ms playback begins into the clip's span (0 when starting at/before the
+    // clip start). Fades are defined in timeline-ms from the clip's start/end and run
+    // at wall-clock rate 1:1 (timeline seconds == audible wall seconds), so we can map
+    // a fade boundary to a ctx time via `startAt + (boundaryMs - intoClipMs)/1000`.
+    const intoClipMs = Math.max(0, fromMs - clip.startOnTimeline);
+    const spanMs = clip.endOnTimeline - clip.startOnTimeline;
+
+    if (fadeInSec > 0) {
+      const fadeInMs = fadeInSec * 1000;
+      if (intoClipMs < fadeInMs) {
+        // Resuming before/inside the fade-in: seed the partially-ramped gain and
+        // continue the SAME ramp to baseGain at the fade-in boundary — matching the
+        // export's afade=t=in:st=0 (which always ramps from clip-local origin).
+        const startFrac = fadeInMs > 0 ? intoClipMs / fadeInMs : 1;
+        const rampEnd = Math.min(startAt + (fadeInMs - intoClipMs) / 1000, endCtx);
+        clipGain.gain.setValueAtTime(baseGain * startFrac, startAt);
+        clipGain.gain.linearRampToValueAtTime(baseGain, rampEnd);
+      } else {
+        clipGain.gain.setValueAtTime(baseGain, startAt);
+      }
     } else {
       clipGain.gain.setValueAtTime(baseGain, startAt);
     }
+
     if (fadeOutSec > 0) {
-      const foStart = Math.max(startAt, endCtx - fadeOutSec);
-      clipGain.gain.setValueAtTime(baseGain, foStart);
-      clipGain.gain.linearRampToValueAtTime(0, endCtx);
+      const fadeOutMs = fadeOutSec * 1000;
+      const foBoundaryMs = spanMs - fadeOutMs; // clip-timeline ms where fade-out begins
+      if (intoClipMs >= foBoundaryMs) {
+        // Resuming already inside the fade-out: seed the partially-ramped gain and
+        // continue ramping to 0 at the clip end (mirrors export afade=t=out).
+        const outFrac = fadeOutMs > 0 ? (intoClipMs - foBoundaryMs) / fadeOutMs : 1;
+        clipGain.gain.setValueAtTime(baseGain * (1 - Math.min(1, outFrac)), startAt);
+        clipGain.gain.linearRampToValueAtTime(0, endCtx);
+      } else {
+        const foStart = Math.max(startAt, startAt + (foBoundaryMs - intoClipMs) / 1000);
+        clipGain.gain.setValueAtTime(baseGain, foStart);
+        clipGain.gain.linearRampToValueAtTime(0, endCtx);
+      }
     }
 
     src.connect(clipGain);

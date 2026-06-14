@@ -52,7 +52,7 @@ const FFMPEG_PATH = process.env['FFMPEG_PATH'] ?? 'ffmpeg';
  */
 const INTER_FONT_DIR = process.env['INTER_FONT_DIR'] ?? '/usr/share/fonts/inter';
 
-/** Free-tier MVP export defaults (MP4/H.264 ≤1080p, watermark on). */
+/** Free-tier MVP export defaults (MP4/H.264 ≤1080p, watermark-FREE, CEO 2026-06-14). */
 const DEFAULT_EXPORT_SETTINGS: ExportSettings = {
   format: 'mp4',
   videoCodec: 'h264',
@@ -60,7 +60,7 @@ const DEFAULT_EXPORT_SETTINGS: ExportSettings = {
   fps: 30,
   crf: 18,
   captions: 'none',
-  watermark: true,
+  watermark: false,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -54,7 +54,25 @@ function clampResolution(res: { w: number; h: number }): { w: number; h: number 
   return { w: Math.round(w * scale), h: Math.round(h * scale) };
 }
 
-/** Free-tier MVP export defaults (MP4/H.264 ≤1080p, watermark on). */
+/** Allowed export frame rates (MVP: the modal offers exactly these). */
+const ALLOWED_FPS = [24, 25, 30] as const;
+const DEFAULT_FPS = 30;
+
+/**
+ * Coerce a client-supplied fps to the allowed set {24,25,30}. Never trust the
+ * client: an out-of-set or non-finite value snaps to the NEAREST allowed rate
+ * (so e.g. 60 → 30, 23.976 → 24), keeping the encode bounded + spec-conformant.
+ */
+function clampFps(fps: unknown): number {
+  const n = Number(fps);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_FPS;
+  if ((ALLOWED_FPS as readonly number[]).includes(n)) return n;
+  return ALLOWED_FPS.reduce((best, cand) =>
+    Math.abs(cand - n) < Math.abs(best - n) ? cand : best,
+  );
+}
+
+/** Free-tier MVP export defaults (MP4/H.264 ≤1080p, watermark-FREE, CEO 2026-06-14). */
 const DEFAULT_EXPORT_SETTINGS: ExportSettings = {
   format: 'mp4',
   videoCodec: 'h264',
@@ -62,7 +80,7 @@ const DEFAULT_EXPORT_SETTINGS: ExportSettings = {
   fps: 30,
   crf: 18,
   captions: 'none',
-  watermark: true,
+  watermark: false,
 };
 
 // ── Body shapes ──────────────────────────────────────────────────────────────
@@ -155,8 +173,8 @@ export async function exportRoutes(app: FastifyInstance): Promise<void> {
     //     exports under the user's `projectId`. A malformed snapshot → 400
     //     (mirrors POST /projects' document path), never an insert/enqueue.
     //   • absent → render the stored project by id (the exact prior behaviour).
-    // Either way the SAME settings (watermark: true) + rate-limit + graph build
-    // run below, so the snapshot never bypasses the Free-tier watermark.
+    // Either way the SAME settings (watermark-free Free tier, CEO 2026-06-14) +
+    // rate-limit + graph build run below, so both paths get identical handling.
     let project: Project;
     if (body.document !== undefined && body.document !== null) {
       const snapshot = validateProject(body.document);
@@ -216,6 +234,11 @@ export async function exportRoutes(app: FastifyInstance): Promise<void> {
     // Server-side free-tier resolution clamp: short edge ≤ 1080p. Never trust the
     // client's resolution; downscale (keeping aspect ratio) when it exceeds the cap.
     mergedSettings.resolution = clampResolution(mergedSettings.resolution);
+
+    // Server-side fps clamp: never trust the client's fps. Coerce to the allowed
+    // set {24,25,30} (nearest) so an out-of-range value can't produce a malformed
+    // or runaway encode — parallels the resolution clamp above.
+    mergedSettings.fps = clampFps(mergedSettings.fps);
 
     try {
       buildExportCommand(project, mergedSettings);

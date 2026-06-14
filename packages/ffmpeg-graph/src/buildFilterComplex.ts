@@ -45,6 +45,7 @@ import type {
   VoiceOverTrack,
   Clip,
   CaptionTrack,
+  CaptionStyle,
   OverlayTrack,
   TextOverlay,
   Transition,
@@ -339,9 +340,26 @@ function msToSrtStamp(ms: number): string {
 }
 
 /**
+ * Sanitise a caption block's text for SRT/libass: normalise every newline flavour
+ * (CRLF, CR, the literal escape "\n") to a single real LF so multi-line blocks render
+ * one cue line per line (and the BURN path via `subtitles` agrees with the SIDECAR
+ * file byte-for-byte). `{`/`}` are libass override-code delimiters — an unescaped `{`
+ * would silently swallow text until the next `}`; we escape both so user text renders
+ * literally (matching the preview canvas, which draws the raw string). Pure.
+ */
+function sanitizeCaptionText(text: string): string {
+  return text
+    .replace(/\r\n?/g, "\n") // CRLF / lone CR → LF
+    .replace(/\\n/g, "\n") // a literal backslash-n escape → real newline
+    .replace(/[{}]/g, (ch) => (ch === "{" ? "\\{" : "\\}")); // neutralise libass override braces
+}
+
+/**
  * Serialise the FIRST caption track's blocks to an SRT string (MVP: 1 caption track,
  * MVP_Scope §1.6). Pure — the worker writes this to disk before invoking FFmpeg.
  * Exported so the sidecar-export path and tests can reuse the exact same bytes.
+ * Text is sanitised ({@link sanitizeCaptionText}) so embedded newlines + `{`/`}` are
+ * safe and the burn / sidecar / preview renderings cannot diverge.
  */
 export function captionsToSrt(track: CaptionTrack): string {
   return (
@@ -349,9 +367,78 @@ export function captionsToSrt(track: CaptionTrack): string {
       .slice()
       // Stable ordering by start time so output is deterministic regardless of input order.
       .sort((a, b) => a.startMs - b.startMs || a.endMs - b.endMs)
-      .map((b, i) => `${i + 1}\n${msToSrtStamp(b.startMs)} --> ${msToSrtStamp(b.endMs)}\n${b.text}`)
+      .map(
+        (b, i) =>
+          `${i + 1}\n${msToSrtStamp(b.startMs)} --> ${msToSrtStamp(b.endMs)}\n${sanitizeCaptionText(b.text)}`,
+      )
       .join("\n\n") + "\n"
   );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Caption burn-in styling (invariant parity with PreviewEngine._drawCaptions).
+//
+// The preview styles captions from the track CaptionStyle: Inter 600, fontSize
+// scaled to canvas height with a 14px floor, `style.color` fill, `style.outline`
+// (width+color) stroke, and a top/center/bottom vertical anchor. The export's
+// `subtitles` filter MUST pass the same intent via `force_style` (ASS), or libass
+// renders its own defaults and export ≠ preview. This helper derives that string
+// from the SAME CaptionStyle the preview reads. Pure (no I/O).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * `#RRGGBB[AA]` → ASS `&HBBGGRR` (ASS colours are BGR hex, no alpha here — libass
+ * `Outline`/`Primary` colours use `&HBBGGRR`; we keep them fully opaque to match the
+ * preview, whose caption fill/stroke ignore per-colour alpha). Falls back to white.
+ */
+function hexToAssBgr(color: string | undefined): string {
+  const c = (color ?? "#FFFFFF").replace(/^#/, "");
+  const rgb = c.slice(0, 6).padEnd(6, "0").toUpperCase();
+  const rr = rgb.slice(0, 2);
+  const gg = rgb.slice(2, 4);
+  const bb = rgb.slice(4, 6);
+  return `&H${bb}${gg}${rr}`;
+}
+
+/**
+ * Build the `subtitles` `force_style` argument from a track {@link CaptionStyle},
+ * mirroring `PreviewEngine._drawCaptions`:
+ *   • FontName=Inter (the canvas hardcodes Inter; parity demands the export do too).
+ *   • Fontsize scaled to the OUTPUT height the SAME way the preview scales to its
+ *     render height: `max(14, round(fontSize / canvasHeight * outH))`. The
+ *     `subtitles` filter lays captions out at `PlayResY == outH` (the video frame
+ *     height), so this output-px size lands at the preview's proportional size.
+ *   • PrimaryColour from `style.color`; Outline width + OutlineColour from
+ *     `style.outline` (0 when absent).
+ *   • Alignment from `style.position`: bottom→2, center→5, top→8 (numpad anchors).
+ *
+ * @param canvasH the project canvas height (preview's `project.canvas.height`).
+ * @param outH    the export render height (the surface libass lays out on).
+ */
+export function captionStyleToAssForceStyle(
+  style: CaptionStyle,
+  canvasH: number,
+  outH: number,
+): string {
+  // Preview: size = max(14, (fontSize / canvasHeight) * renderHeight). Reproduce it
+  // against the export height so the burned caption is proportionally identical.
+  const scaled = canvasH > 0 ? (style.fontSize / canvasH) * outH : style.fontSize;
+  const fontPx = Math.max(14, Math.round(scaled));
+  const alignment = style.position === "top" ? 8 : style.position === "center" ? 5 : 2;
+  const primary = hexToAssBgr(style.color);
+  const parts = [
+    "FontName=Inter",
+    `Fontsize=${fontPx}`,
+    `PrimaryColour=${primary}`,
+    `Alignment=${alignment}`,
+  ];
+  if (style.outline && style.outline.width > 0) {
+    parts.push(`Outline=${Math.max(0, Math.round(style.outline.width))}`);
+    parts.push(`OutlineColour=${hexToAssBgr(style.outline.color)}`);
+  } else {
+    parts.push("Outline=0");
+  }
+  return parts.join(",");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -725,7 +812,15 @@ export function buildExportCommand(project: Project, settings: ExportSettings): 
     });
     const next = "vsub";
     // `subtitles` reads the file by path (not a stream), so reference the token path.
-    filterParts.push(`[${videoOut}]subtitles=subtitles\\:captions.srt[${next}]`);
+    // `force_style` carries the track CaptionStyle (color/size/outline/position) so the
+    // burned captions match PreviewEngine._drawCaptions instead of libass defaults —
+    // the export==preview invariant for captions (§22.3). Derived from the SAME
+    // CaptionStyle the preview reads, scaled to the export height the same way.
+    const capStyle = project.captionTracks[0]!.style;
+    const forceStyle = captionStyleToAssForceStyle(capStyle, project.canvas.height, outH);
+    filterParts.push(
+      `[${videoOut}]subtitles=subtitles\\:captions.srt:force_style='${forceStyle}'[${next}]`,
+    );
     videoOut = next;
   }
 
