@@ -101,6 +101,41 @@ makeIfMissing("gold_blue_3s.mp4", () =>
   ]),
 );
 
+// Solid GREEN — the linked-audio-move video bed (only appears at the moved position).
+makeIfMissing("gold_green_3s.mp4", () =>
+  ff([
+    "-y", "-hide_banner",
+    "-f", "lavfi", "-i", "color=c=green:size=640x360:rate=30:duration=3",
+    "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p", "-preset", "medium",
+    "-r", "30", join(MEDIA_DIR, "gold_green_3s.mp4"),
+  ]),
+);
+
+// SQUARE (1:1) testsrc2 — a deliberately non-16:9 source so the image-fit fixtures show a
+// visible difference: `contain` letterboxes (transparent bars L/R revealing the red bed),
+// `cover` crops the top/bottom. The distinctive testsrc2 pattern makes pad vs crop obvious.
+makeIfMissing("gold_square_3s.mp4", () =>
+  ff([
+    "-y", "-hide_banner",
+    "-f", "lavfi", "-i", "testsrc2=size=480x480:rate=30:duration=3",
+    "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p", "-preset", "medium",
+    "-r", "30", join(MEDIA_DIR, "gold_square_3s.mp4"),
+  ]),
+);
+
+// LOUD 440Hz sine WAV (PCM, lossless) — drives the volume-envelope RMS fixture and the
+// linked-audio-move audio side. Near 0 dBFS so the envelope ramp yields a large, stable RMS
+// delta between the early (quiet) and late (loud) analysis windows.
+makeIfMissing("gold_tone_3s.wav", () =>
+  ff([
+    "-y", "-hide_banner",
+    "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=3",
+    "-af", "volume=0.9",
+    "-ac", "2", "-c:a", "pcm_s16le",
+    join(MEDIA_DIR, "gold_tone_3s.wav"),
+  ]),
+);
+
 // ── 2. Legacy fixtures (kept for the older golden.test.ts smoke path + manifest) ──
 mkdirSync(LEGACY_MEDIA, { recursive: true });
 if (!existsSync(join(LEGACY_MEDIA, "bunny_h264_3s.mp4")) || FORCE) {

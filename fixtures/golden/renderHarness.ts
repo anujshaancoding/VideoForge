@@ -22,13 +22,14 @@ import { fileURLToPath } from "node:url";
 // name) so this harness resolves identically whether it is loaded by vitest inside
 // packages/ffmpeg-graph or by `tsx` from the repo root — no dependence on a hoisted
 // root node_modules/@videoforge symlink.
-import { buildExportCommand } from "../../packages/ffmpeg-graph/src/buildFilterComplex.js";
+import { buildExportCommand, captionsToSrt } from "../../packages/ffmpeg-graph/src/buildFilterComplex.js";
 import {
   GOLDEN_FIXTURES,
   GOLDEN_EXPORT_SETTINGS,
   FIXTURE_ASSET_MAP,
   type GoldenFixture,
 } from "../projects/index.js";
+import type { ExportSettings } from "../../packages/ffmpeg-graph/src/buildFilterComplex.js";
 
 export { GOLDEN_FIXTURES, GOLDEN_EXPORT_SETTINGS };
 export type { GoldenFixture };
@@ -139,18 +140,40 @@ export function renderFixtureToMp4(fixtureId: string, outPath: string) {
   const fixture = GOLDEN_FIXTURES.find((f) => f.id === fixtureId);
   if (!fixture) throw new Error(`unknown golden fixture: ${fixtureId}`);
 
-  const { args, inputs, textFiles, fonts } = buildExportCommand(
-    fixture.project,
-    GOLDEN_EXPORT_SETTINGS,
-  );
+  // Per-fixture settings override the shared base (e.g. captions:"burn"). This mirrors
+  // the export endpoint resolving per-job settings; the BASE keeps watermark OFF (the
+  // 2026-06-14 watermark-free default) and captions "none".
+  const settings: ExportSettings = { ...GOLDEN_EXPORT_SETTINGS, ...(fixture.settings ?? {}) };
 
-  // Map each clip input's `asset:<id>` token → its synthetic fixture file path.
+  const { args, inputs, textFiles, fonts } = buildExportCommand(fixture.project, settings);
+
+  // Map each clip input's `asset:<id>` token → its synthetic fixture file path. Also
+  // resolve the burned-caption `subtitles:` input token EXACTLY as the render worker does:
+  // write the SRT (via the SAME captionsToSrt serializer) and substitute it both as the
+  // whole-arg `-i` value AND inside the `-filter_complex` `subtitles\:captions.srt` ref.
   const tokenToPath = new Map<string, string>();
+  // In-filter substitutions (font/text sentinels live here; the subtitles file path too).
+  const filterReplacements = new Map<string, string>();
   for (const inp of inputs) {
     if (inp.kind === "clip" && inp.assetId) {
       const file = FIXTURE_ASSET_MAP[inp.assetId];
       if (!file) throw new Error(`no fixture media mapped for asset ${inp.assetId}`);
       tokenToPath.set(inp.path, join(MEDIA_DIR, file));
+    } else if (inp.kind === "subtitles") {
+      const track = fixture.project.captionTracks[0];
+      if (!track) throw new Error(`caption fixture ${fixtureId} has no captionTracks[0]`);
+      const dir = mkdtempSync(join(tmpdir(), "vf-golden-srt-"));
+      const srtPath = join(dir, "captions.srt");
+      writeFileSync(srtPath, captionsToSrt(track));
+      // Whole-arg form (the `-i subtitles:captions.srt`) — kept for completeness even
+      // though the `subtitles` filter reads by filter-option, not as a stream input.
+      tokenToPath.set(inp.path, srtPath);
+      // In-filter form: `subtitles=subtitles\:captions.srt:...`. FFmpeg filter-option
+      // values escape `:` as `\:`, so the path must be escaped the same way the worker's
+      // token (no escape) would NOT be — we replace the ESCAPED sentinel with the escaped
+      // path so libavfilter parses a literal filename.
+      const escapedPath = srtPath.replace(/\\/g, "/").replace(/:/g, "\\:");
+      filterReplacements.set("subtitles\\:captions.srt", escapedPath);
     }
   }
 
@@ -159,7 +182,6 @@ export function renderFixtureToMp4(fixtureId: string, outPath: string) {
   // golden is produced by the same drawtext the production export emits. The Inter faces
   // come from INTER_FONT_DIR (the pinned image; on a host without Inter the render simply
   // fails and the gate's precondition check reports it).
-  const filterReplacements = new Map<string, string>();
   for (const f of fonts) filterReplacements.set(f.token, join(INTER_FONT_DIR, f.file));
   if (textFiles.length > 0) {
     const dir = mkdtempSync(join(tmpdir(), "vf-golden-text-"));
@@ -253,4 +275,49 @@ export function compareSsimPsnr(
   const psnrStr = psnrMatch[1]!;
   const psnr = psnrStr.toLowerCase() === "inf" ? Number.POSITIVE_INFINITY : Number.parseFloat(psnrStr);
   return { ssim, psnr, raw };
+}
+
+/**
+ * Measure the mean-volume RMS (dBFS) of `mp4Path` over a window [startMs, startMs+durMs)
+ * using FFmpeg's `volumedetect` filter on the audio stream. Audio has no frame golden, so
+ * the volume-envelope / linked-audio fixtures assert on this energy measure instead of a
+ * committed PNG. Deterministic (the same synthetic tone + same graph ⇒ same RMS).
+ *
+ * Returns `mean_volume` in dBFS (e.g. -3.1). Throws if the window has no audio / parse fails.
+ */
+export function measureRmsDb(mp4Path: string, startMs: number, durMs: number): number {
+  assertPinnedFFmpegVersion();
+
+  const ss = (startMs / 1000).toFixed(3);
+  const t = (durMs / 1000).toFixed(3);
+  const r = spawnSync(
+    FFMPEG,
+    [
+      "-hide_banner",
+      "-nostdin",
+      "-ss",
+      ss,
+      "-t",
+      t,
+      "-i",
+      mp4Path,
+      "-map",
+      "0:a:0",
+      "-af",
+      "volumedetect",
+      "-f",
+      "null",
+      "-",
+    ],
+    { stdio: "pipe", encoding: "utf-8" },
+  );
+  const raw = (r.stderr ?? "") + (r.stdout ?? "");
+  // volumedetect prints: "[Parsed_volumedetect_0 @ ..] mean_volume: -23.4 dB".
+  const m = /mean_volume:\s*(-?[0-9.]+)\s*dB/i.exec(raw);
+  if (!m) {
+    throw new Error(
+      `could not parse mean_volume for window [${startMs},${startMs + durMs})ms (exit ${r.status}). Raw:\n${raw}`,
+    );
+  }
+  return Number.parseFloat(m[1]!);
 }

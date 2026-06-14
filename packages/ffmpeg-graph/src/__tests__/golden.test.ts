@@ -34,6 +34,7 @@ import {
   renderFixtureToMp4,
   extractFrame,
   compareSsimPsnr,
+  measureRmsDb,
   ffmpegPresent,
   ffmpegVersionLine,
   fixtureMediaPresent,
@@ -124,6 +125,7 @@ describe.skipIf(!ready)("Golden-frame fidelity gate (SSIM ≥ 0.985, PSNR ≥ 38
         }
       });
 
+      // ── FRAME fixtures: SSIM/PSNR each sampled timestamp vs committed golden PNG. ──
       for (const t of fixture.sampleTimesMs) {
         it(`frame @${t}ms matches golden within thresholds`, () => {
           const actualPng = join(workDir, `${fixture.id}_t${t}_actual.png`);
@@ -145,6 +147,28 @@ describe.skipIf(!ready)("Golden-frame fidelity gate (SSIM ≥ 0.985, PSNR ≥ 38
           // BOTH metrics must clear (§22.3): SSIM = structural drift, PSNR = numeric drift.
           expect(ssim, `SSIM below threshold${detail}`).toBeGreaterThanOrEqual(SSIM_MIN);
           expect(psnr, `PSNR below threshold${detail}`).toBeGreaterThanOrEqual(PSNR_MIN);
+        });
+      }
+
+      // ── AUDIO fixtures: frame SSIM doesn't apply; assert the RMS gain between the
+      //    first and last analysis window (the §3.4 envelope SHAPE the preview mixes). ──
+      if (fixture.compare === "audio-rms") {
+        it(`audio RMS gain across the envelope window ≥ ${fixture.minRmsGainDb ?? 0} dB`, () => {
+          const windows = fixture.audioWindowsMs ?? [];
+          expect(windows.length, "audio-rms fixture needs ≥2 windows").toBeGreaterThanOrEqual(2);
+
+          const dbs = windows.map((w) => measureRmsDb(mp4Path, w.startMs, w.durMs));
+          const first = dbs[0]!;
+          const last = dbs[dbs.length - 1]!;
+          const gain = last - first; // dB increase from first → last window.
+          const need = fixture.minRmsGainDb ?? 0;
+
+          const detail =
+            `\nfixture=${fixture.id} windows=${JSON.stringify(windows)} ` +
+            `rmsDb=[${dbs.map((d) => d.toFixed(2)).join(", ")}] gain=${gain.toFixed(2)}dB (need ≥ ${need}dB)`;
+
+          // The envelope ramps gain UP, so the later window must be louder by ≥ need dB.
+          expect(gain, `audio RMS gain below threshold${detail}`).toBeGreaterThanOrEqual(need);
         });
       }
     });

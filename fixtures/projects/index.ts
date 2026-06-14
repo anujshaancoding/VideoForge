@@ -24,6 +24,8 @@
 import type {
   Project,
   VideoTrack,
+  AudioTrack,
+  CaptionTrack,
   Clip,
   OverlayTrack,
   TextOverlay,
@@ -39,6 +41,10 @@ const WORKSPACE_ID = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
 export const ASSET_BARS = "aa000000-0000-4000-8000-000000000001"; // testsrc2 counter clip
 export const ASSET_RED = "aa000000-0000-4000-8000-000000000002"; // solid red clip
 export const ASSET_BLUE = "aa000000-0000-4000-8000-000000000003"; // solid blue clip
+// New parity-surface sources.
+export const ASSET_GREEN = "aa000000-0000-4000-8000-000000000004"; // solid green clip (linked-audio video bed)
+export const ASSET_SQUARE = "aa000000-0000-4000-8000-000000000005"; // 1:1 testsrc2 — non-16:9 → contain bars / cover crop are visible
+export const ASSET_TONE_LOUD = "aa000000-0000-4000-8000-000000000006"; // 0 dBFS-ish 440Hz tone WAV — drives volume-envelope + linked audio RMS
 
 /**
  * Asset id → synthetic fixture filename (under fixtures/media/). The render
@@ -49,6 +55,9 @@ export const FIXTURE_ASSET_MAP: Record<string, string> = {
   [ASSET_BARS]: "gold_bars_5s.mp4",
   [ASSET_RED]: "gold_red_3s.mp4",
   [ASSET_BLUE]: "gold_blue_3s.mp4",
+  [ASSET_GREEN]: "gold_green_3s.mp4",
+  [ASSET_SQUARE]: "gold_square_3s.mp4",
+  [ASSET_TONE_LOUD]: "gold_tone_3s.wav",
 };
 
 // ── Shared export settings (lossy H.264 @ Auto-CRF row of §22.3) ────────────────
@@ -75,11 +84,35 @@ function videoTrack(id: string, name: string, clips: Clip[]): VideoTrack {
     muted: false,
     solo: false,
     locked: false,
+    hidden: false,
     clips,
   };
 }
 
-function baseProject(id: string, title: string, tracks: VideoTrack[]): Project {
+function audioTrack(
+  id: string,
+  name: string,
+  clips: Clip[],
+  mix: { volume?: number; pan?: number; volumeEnvelope?: Array<{ timeMs: number; value: number }> } = {},
+): AudioTrack {
+  return {
+    id,
+    type: "audio",
+    name,
+    colour: "#1FB6A0",
+    height: 56,
+    muted: false,
+    solo: false,
+    locked: false,
+    hidden: false,
+    volume: mix.volume ?? 100,
+    pan: mix.pan ?? 0,
+    volumeEnvelope: mix.volumeEnvelope ?? [],
+    clips,
+  };
+}
+
+function baseProject(id: string, title: string, tracks: Project["tracks"]): Project {
   return {
     schemaVersion: 1,
     revision: 1,
@@ -280,6 +313,7 @@ function textProject(id: string, title: string, overlays: TextOverlay[]): Projec
     muted: false,
     solo: false,
     locked: false,
+    hidden: false,
     clips: overlays,
   };
   p.tracks.push(overlayTrack);
@@ -343,6 +377,320 @@ export const overlayTextWeightOpacityProject = textProject(
   ],
 );
 
+// ── (d) SPLIT ─────────────────────────────────────────────────────────────────────
+// One source split into TWO adjacent timeline clips at the cut point. Clip A plays
+// source 0–1000ms on timeline 0–1000; clip B plays source 1000–2000ms on timeline
+// 1000–2000. Sampling at 500ms (inside A) and 1500ms (inside B) proves each half
+// shows its OWN source span — i.e. the split's trim bookkeeping is correct and the
+// two clips don't both replay source-origin frames.
+export const splitProject: Project = baseProject(
+  "44444444-4444-4444-8444-444444444444",
+  "split",
+  [
+    videoTrack("44444444-4444-4444-8444-4444444444a0", "Video 1", [
+      {
+        id: "44444444-4444-4444-8444-4444444444c0",
+        sourceAssetId: ASSET_BARS,
+        trackId: "44444444-4444-4444-8444-4444444444a0",
+        startOnTimeline: 0,
+        endOnTimeline: 1000,
+        trimIn: 0,
+        trimOut: 1000,
+        speed: 1,
+        effects: [],
+        keyframes: {},
+        linkedClipId: null,
+      },
+      {
+        id: "44444444-4444-4444-8444-4444444444c1",
+        sourceAssetId: ASSET_BARS,
+        trackId: "44444444-4444-4444-8444-4444444444a0",
+        startOnTimeline: 1000,
+        endOnTimeline: 2000,
+        trimIn: 1000,
+        trimOut: 2000,
+        speed: 1,
+        effects: [],
+        keyframes: {},
+        linkedClipId: null,
+      },
+    ]),
+  ],
+);
+
+// ── (e) LINKED-AUDIO MOVE ───────────────────────────────────────────────────────────
+// A video clip + its linked audio clip, both MOVED to start at timeline 1000ms (the
+// link kept them together). The GREEN video bed only appears from 1000ms (before that
+// the canvas background shows), and the linked TONE audio only sounds from 1000ms.
+//   • video frame @1500ms → GREEN (clip present); @500ms → background (clip absent).
+//   • audio RMS @1500ms → loud (tone present); @250ms → ~silent (tone absent).
+// This guards that a linked pair exports at the SAME moved position on both streams.
+const LINKED_VIDEO_CLIP = "55555555-5555-4555-8555-5555555555c0";
+const LINKED_AUDIO_CLIP = "55555555-5555-4555-8555-5555555555c1";
+export const linkedAudioMoveProject: Project = baseProject(
+  "55555555-5555-4555-8555-555555555555",
+  "linked_audio_move",
+  [
+    videoTrack("55555555-5555-4555-8555-5555555555a0", "Video 1", [
+      {
+        id: LINKED_VIDEO_CLIP,
+        sourceAssetId: ASSET_GREEN,
+        trackId: "55555555-5555-4555-8555-5555555555a0",
+        startOnTimeline: 1000,
+        endOnTimeline: 3000,
+        trimIn: 0,
+        trimOut: 2000,
+        speed: 1,
+        effects: [],
+        keyframes: {},
+        linkedClipId: LINKED_AUDIO_CLIP,
+      },
+    ]),
+    audioTrack("55555555-5555-4555-8555-5555555555b0", "Audio 1", [
+      {
+        id: LINKED_AUDIO_CLIP,
+        sourceAssetId: ASSET_TONE_LOUD,
+        trackId: "55555555-5555-4555-8555-5555555555b0",
+        startOnTimeline: 1000,
+        endOnTimeline: 3000,
+        trimIn: 0,
+        trimOut: 2000,
+        speed: 1,
+        effects: [],
+        keyframes: {},
+        linkedClipId: LINKED_VIDEO_CLIP,
+      },
+    ]),
+  ],
+);
+
+// ── (f) UNDERLINE DRAWBOX ───────────────────────────────────────────────────────────
+// A text overlay with `style.underline` → drawtext + a `drawbox` rule under the line
+// (drawtext has no underline; the SHARED `underlineRule` geometry is drawn as a filled
+// box). If the underline box is mis-placed/sized vs the committed golden, SSIM drops.
+export const overlayUnderlineProject = textProject(
+  "a7777777-7777-4777-8777-777777777777",
+  "overlay_underline",
+  [
+    textOverlay(
+      "a7777777-7777-4777-8777-7777777777d1",
+      "Underlined",
+      { fontSize: 44, underline: true },
+    ),
+  ],
+);
+
+// ── (g) CAPTION FORCE_STYLE BURN-IN ───────────────────────────────────────────────────
+// captions:"burn" → the `subtitles` filter with a `force_style` derived from the track
+// CaptionStyle (Inter, scaled size, colour, outline, position). Guards that the burned
+// caption matches the preview styling, not libass defaults. Needs Inter (fontconfig) in
+// the pinned image — skips locally like the text fixtures.
+const CAPTION_BG_TRACK = "66666666-6666-4666-8666-6666666666a0";
+const CAPTION_TRACK = "66666666-6666-4666-8666-6666666666f0";
+export const captionBurnProject: Project = (() => {
+  const p = baseProject(
+    "66666666-6666-4666-8666-666666666666",
+    "caption_burn",
+    [
+      videoTrack(CAPTION_BG_TRACK, "Background", [
+        {
+          id: "66666666-6666-4666-8666-6666666666c0",
+          sourceAssetId: ASSET_BLUE,
+          trackId: CAPTION_BG_TRACK,
+          startOnTimeline: 0,
+          endOnTimeline: 2000,
+          trimIn: 0,
+          trimOut: 2000,
+          speed: 1,
+          effects: [],
+          keyframes: {},
+          linkedClipId: null,
+        },
+      ]),
+    ],
+  );
+  const captionTrack: CaptionTrack = {
+    id: CAPTION_TRACK,
+    type: "caption",
+    name: "Captions",
+    colour: "#FFD166",
+    height: 48,
+    muted: false,
+    solo: false,
+    locked: false,
+    hidden: false,
+    language: "en",
+    style: {
+      fontFamily: "Inter",
+      fontSize: 40,
+      color: "#FFD166",
+      position: "bottom",
+      align: "center",
+      outline: { width: 3, color: "#101010" },
+    },
+    blocks: [
+      {
+        id: "66666666-6666-4666-8666-6666666666b1",
+        startMs: 0,
+        endMs: 2000,
+        text: "Burned caption",
+      },
+    ],
+  };
+  p.captionTracks = [captionTrack];
+  return p;
+})();
+
+// ── (h) WATERMARK-OFF DEFAULT ─────────────────────────────────────────────────────────
+// 2026-06-14 decision: watermark is OFF by default (watermark-free 1080p). This fixture
+// renders a full-frame RED clip with watermark:false (the default settings) and asserts
+// the bottom-right corner is CLEAN red — NO branding badge. A regression that re-enables
+// the watermark would stamp a badge in the corner → SSIM drops vs the clean golden.
+export const watermarkOffProject: Project = baseProject(
+  "77777777-7777-4777-8777-777777777777",
+  "watermark_off",
+  [
+    videoTrack("77777777-7777-4777-8777-7777777777a0", "Video 1", [
+      {
+        id: "77777777-7777-4777-8777-7777777777c0",
+        sourceAssetId: ASSET_RED,
+        trackId: "77777777-7777-4777-8777-7777777777a0",
+        startOnTimeline: 0,
+        endOnTimeline: 2000,
+        trimIn: 0,
+        trimOut: 2000,
+        speed: 1,
+        effects: [],
+        keyframes: {},
+        linkedClipId: null,
+      },
+    ]),
+  ],
+);
+
+// ── (i) IMAGE-CLIP FIT: contain + cover ────────────────────────────────────────────────
+// A 1:1 (square) source placed in a WIDE 16:9 box (transform 10..90% × 30..70%). The fit
+// mode drives `clipFitScaleSteps`:
+//   • contain → letterbox: the square is scaled to fit INSIDE the box, transparent bars
+//               left/right reveal the canvas background under it.
+//   • cover   → crop: the square is scaled to FILL the box, top/bottom of the source
+//               cropped away (no bars).
+// Same source + same box, different fit → visibly different frames; each has its own
+// golden, guarding the SHARED contain/cover geometry. (The builder treats image and
+// video clips identically — same `asset:` input — so a video square exercises the exact
+// image-fit code path deterministically without an opaque PNG binary input.)
+const FIT_BOX = { x: 10, y: 30, width: 80, height: 40 }; // wide box; source is square → AR mismatch
+function fitProject(id: string, title: string, fit: "contain" | "cover", clipId: string): Project {
+  return baseProject(id, title, [
+    // Bottom: full-frame RED so contain's transparent letterbox bars are clearly red.
+    videoTrack(`${id.slice(0, 8)}-0000-4000-8000-0000000000a0`, "Background", [
+      {
+        id: `${id.slice(0, 8)}-0000-4000-8000-0000000000c9`,
+        sourceAssetId: ASSET_RED,
+        trackId: `${id.slice(0, 8)}-0000-4000-8000-0000000000a0`,
+        startOnTimeline: 0,
+        endOnTimeline: 2000,
+        trimIn: 0,
+        trimOut: 2000,
+        speed: 1,
+        effects: [],
+        keyframes: {},
+        linkedClipId: null,
+      },
+    ]),
+    // Top: the square source in the wide box, with the fit under test.
+    videoTrack(`${id.slice(0, 8)}-0000-4000-8000-0000000000a1`, "Image", [
+      {
+        id: clipId,
+        sourceAssetId: ASSET_SQUARE,
+        trackId: `${id.slice(0, 8)}-0000-4000-8000-0000000000a1`,
+        startOnTimeline: 0,
+        endOnTimeline: 2000,
+        trimIn: 0,
+        trimOut: 2000,
+        speed: 1,
+        effects: [],
+        keyframes: {},
+        linkedClipId: null,
+        transform: FIT_BOX,
+        fit,
+      },
+    ]),
+  ]);
+}
+export const imageContainProject = fitProject(
+  "88888888-8888-4888-8888-888888888888",
+  "image_contain",
+  "contain",
+  "88888888-8888-4888-8888-8888888888c1",
+);
+export const imageCoverProject = fitProject(
+  "99999999-9999-4999-8999-999999999999",
+  "image_cover",
+  "cover",
+  "99999999-9999-4999-8999-9999999999c1",
+);
+
+// ── (j) VOLUME-ENVELOPE (audio parity via RMS) ──────────────────────────────────────────
+// An audio track carrying the loud tone, with a piecewise-LINEAR volume envelope that
+// ramps the gain from ~0% at t=0 up to 100% at t=2000ms (the §3.4 automation). Frame
+// SSIM doesn't apply to audio, so this fixture is checked via RMS energy at two times:
+//   • @250ms  → low RMS (envelope near the bottom of the ramp).
+//   • @1800ms → high RMS (envelope near the top of the ramp).
+// The asserted RATIO (later >> earlier) proves the export reproduced the SAME automation
+// curve the preview mix samples — the audio half of the WYCIWYG invariant.
+export const audioVolumeEnvelopeProject: Project = baseProject(
+  "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "audio_volume_envelope",
+  [
+    // A 1px video bed so the export has a video stream too (keeps the encode well-formed).
+    videoTrack("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaa0a0", "Video 1", [
+      {
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaa0c0",
+        sourceAssetId: ASSET_BLUE,
+        trackId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaa0a0",
+        startOnTimeline: 0,
+        endOnTimeline: 2000,
+        trimIn: 0,
+        trimOut: 2000,
+        speed: 1,
+        effects: [],
+        keyframes: {},
+        linkedClipId: null,
+      },
+    ]),
+    audioTrack(
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaa0b0",
+      "Audio 1",
+      [
+        {
+          id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaa0c1",
+          sourceAssetId: ASSET_TONE_LOUD,
+          trackId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaa0b0",
+          startOnTimeline: 0,
+          endOnTimeline: 2000,
+          trimIn: 0,
+          trimOut: 2000,
+          speed: 1,
+          effects: [],
+          keyframes: {},
+          linkedClipId: null,
+        },
+      ],
+      // Linear ramp 0% → 100% across the 2s span.
+      { volumeEnvelope: [{ timeMs: 0, value: 0 }, { timeMs: 2000, value: 100 }] },
+    ),
+  ],
+);
+
+/**
+ * What a fixture's render is compared on:
+ *   • "frame"     — extract PNG(s) at sampleTimesMs and SSIM/PSNR vs committed goldens.
+ *   • "audio-rms" — extract per-window RMS at audioWindowsMs and assert a gain RATIO
+ *                   (audio has no frame golden; we check the envelope SHAPE, not a PNG).
+ */
+export type GoldenCompare = "frame" | "audio-rms";
+
 /**
  * One fixture-matrix entry. `sampleTimesMs` are timeline timestamps at which a
  * frame is extracted and compared to the committed golden PNG named
@@ -351,8 +699,20 @@ export const overlayTextWeightOpacityProject = textProject(
 export interface GoldenFixture {
   id: string;
   project: Project;
+  /** How this fixture is verified. Defaults to "frame". */
+  compare?: GoldenCompare;
+  /** Per-fixture export-settings override (merged over GOLDEN_EXPORT_SETTINGS). */
+  settings?: Partial<ExportSettings>;
   /** Timeline timestamps (ms) to extract+compare. Chosen inside every clip's span. */
   sampleTimesMs: number[];
+  /**
+   * For compare:"audio-rms" — ordered analysis windows. Each is a short span over which
+   * mean-volume RMS (dBFS) is measured. The test asserts the LAST window is louder than
+   * the FIRST by at least `minRmsGainDb`, proving the gain automation/placement.
+   */
+  audioWindowsMs?: Array<{ startMs: number; durMs: number }>;
+  /** For compare:"audio-rms" — required dB gain from the first to the last window. */
+  minRmsGainDb?: number;
 }
 
 /**
@@ -360,13 +720,27 @@ export interface GoldenFixture {
  * generate-fixtures.ts (--update / initial golden synthesis).
  */
 export const GOLDEN_FIXTURES: GoldenFixture[] = [
+  // ── Spec-set core graph paths ──────────────────────────────────────────────────
   // Trim: clip spans timeline 0–2000; sample at 1000ms (well inside, avoids edges).
   { id: "trim", project: trimProject, sampleTimesMs: [1000] },
+  // Split: two adjacent halves; sample inside EACH (500ms = clip A, 1500ms = clip B).
+  { id: "split", project: splitProject, sampleTimesMs: [500, 1500] },
   // Stack: both layers span 0–2000; sample at 1000ms.
   { id: "stack", project: stackProject, sampleTimesMs: [1000] },
   // Speed: 2× clip spans timeline 0–2000; sample at 1000ms (= source t≈2000ms).
   { id: "speed", project: speedProject, sampleTimesMs: [1000] },
-  // Text overlays — each samples at 1000ms (strictly inside the [0,2000) window, so the
+  // Linked-audio move: pair moved to start @1000ms. @1500ms GREEN bed is present,
+  // @500ms it is not (background). (Audio side of the link is covered by RMS below.)
+  { id: "linked_audio_move", project: linkedAudioMoveProject, sampleTimesMs: [500, 1500] },
+
+  // ── This session's new parity surfaces (each guards one) ─────────────────────────
+  // Watermark-OFF default (2026-06-14): clean corner, no branding badge.
+  { id: "watermark_off", project: watermarkOffProject, sampleTimesMs: [1000] },
+  // Image-clip fit: same square source + same wide box, contain vs cover.
+  { id: "image_contain", project: imageContainProject, sampleTimesMs: [1000] },
+  { id: "image_cover", project: imageCoverProject, sampleTimesMs: [1000] },
+
+  // ── Text overlays — each samples at 1000ms (strictly inside the [0,2000) window, so the
   // `enable=between` inclusive-end nuance is irrelevant). These render only where Inter is
   // bundled (the pinned-FFmpeg image); the gate skips otherwise (like the media fixtures).
   { id: "overlay_text_default", project: overlayTextDefaultProject, sampleTimesMs: [1000] },
@@ -375,4 +749,22 @@ export const GOLDEN_FIXTURES: GoldenFixture[] = [
   { id: "overlay_text_escape", project: overlayTextEscapeProject, sampleTimesMs: [1000] },
   { id: "overlay_text_subfloor", project: overlayTextSubfloorProject, sampleTimesMs: [1000] },
   { id: "overlay_text_weight_opacity", project: overlayTextWeightOpacityProject, sampleTimesMs: [1000] },
+  // Underline → drawtext + drawbox rule (Inter-dependent, like text fixtures).
+  { id: "overlay_underline", project: overlayUnderlineProject, sampleTimesMs: [1000] },
+  // Caption force_style burn-in (Inter via fontconfig in the pinned image).
+  { id: "caption_burn", project: captionBurnProject, settings: { captions: "burn" }, sampleTimesMs: [1000] },
+
+  // ── Audio parity (RMS, not frame SSIM) ──────────────────────────────────────────
+  // Volume envelope: gain ramps 0%→100% over 2s; later window must be much louder.
+  {
+    id: "audio_volume_envelope",
+    project: audioVolumeEnvelopeProject,
+    compare: "audio-rms",
+    sampleTimesMs: [],
+    audioWindowsMs: [
+      { startMs: 100, durMs: 300 },
+      { startMs: 1600, durMs: 300 },
+    ],
+    minRmsGainDb: 12,
+  },
 ];
