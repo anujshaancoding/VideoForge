@@ -3,7 +3,21 @@
 Owner: **Vera** (Head of Product). Source of scope truth: `docs/MVP_Scope.md`.
 Keep this as a Now / Next / Later board. Atlas references it at standup.
 
-Last updated: 2026-06-05
+Last updated: 2026-06-14
+
+> **🆚 Canva end-to-end parity sweep (CEO-directed, 2026-06-14) — SHIPPED.** Full audit (import→timeline→
+> canvas→audio/text→export) + a continuous build loop closed every in-scope and CEO-greenlit gap across 9
+> commits, all typecheck-green at the pre-existing test baseline. Highlights: restored the preview==export
+> invariant (watermark-free default, caption `force_style`, font lock, audio-fade, removed lying controls);
+> filled promised gaps (ripple delete, track-lock, copy/paste, format/size guards, library rename/delete/
+> **search**, **resumable multipart upload**); built the **keyframe interpolation** engine (opacity), **volume
+> envelope**, **multi-select+marquee+group move**, **canvas bg-color + numeric transform inputs + snapping**,
+> **project versioning/restore**, **underline-in-export** (shared Inter text-metrics), **image/logo/PiP export
+> via per-clip fit**, the **CC0 library scaffold** (generated backgrounds), real **template thumbnails**, and
+> the **golden-frame fidelity gate** (real SSIM/PSNR + audio-RMS + full parity fixture matrix) = ROADMAP Now #1.
+> **Remaining Canva gaps are gates:** CC0 external content (Ward: true-CC0/PD only — 4 CEO Qs open); Script
+> Studio v1 (unblocked now the fidelity gate exists); and the off-wedge breadth Scout advises NOT cloning.
+> CI follow-up: run `pnpm generate:fixtures --goldens` in the pinned FFmpeg image to commit reference frames.
 
 > **🎙️ Script Studio (CEO-requested, blueprint complete 2026-06-05)** — paste a script → auto-built
 > *editable* timeline = OSS Piper voice-over + text-card scenes + auto-captions → edit & export in the
