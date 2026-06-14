@@ -8,6 +8,23 @@ Gate types: 💰 money · 🧭 scope · 🚀 release/publish · ⚠️ irreversi
 
 ## 🔴 Open — needs CEO decision
 
+### 2026-06-14 ⚖️/🧭 CC0 library — external content sourcing + license vetting
+- **Raised by:** Atlas (building the CEO-greenlit CC0 stock+music library)
+- **Context:** The library splits into (1) **engineering** — manifest format + Stock/Audio/Elements panel UI
+  + drag→import flow (Atlas is building this now, $0, no gate); and (2) **content** — the actual stock
+  video/photo + royalty-free music files, which must be genuinely CC0/public-domain and license-vetted
+  before shipping externally. Seeding zero-risk *generated* content (solid/gradient backgrounds, simple
+  elements) is safe and ships now; real stock video + music needs sourcing (Scout) + per-asset license
+  vetting (Ward), and possibly bundling vs. hotlinking decisions.
+- **Decisions needed:** (a) approve a specific CC0 source set (e.g. Pixabay/Pexels CC0, public-domain
+  archives) for Scout to curate; (b) ⚖️ confirm Ward license-vets each bundled asset before external launch;
+  (c) bundle-in-repo (owned, $0, reliable) vs. hotlink (no storage, but reliability/ToS risk).
+- **Atlas recommends:** ship the engineering scaffold + generated zero-risk seed now (no gate); have Scout
+  curate a small bundled CC0 set + Ward vet licenses as a parallel track before this is exposed at launch.
+  Bundle-in-repo over hotlinking.
+- **Decision:** ⏳ pending (does NOT block the scaffold build)
+
+
 ### 2026-06-05 🧭 Canva-parity product push — scope gates from the flow teardown
 - **Raised by:** Atlas (CEO-requested "compare every flow vs Canva, work on what's left"); teardown by Iris, Pixel, Vera, Reel, Scout.
 - **Context:** Full flow-by-flow teardown vs Canva done. Two classes of work fell out: **(A) in-scope items already promised in `MVP_Scope.md` but dead/broken in code** (no gate — Atlas will action), and **(B) Canva-parity pulls beyond MVP** (these gates).
@@ -153,6 +170,21 @@ Gate types: 💰 money · 🧭 scope · 🚀 release/publish · ⚠️ irreversi
 ---
 
 ## ✅ Log — decided
+
+### 2026-06-14 🧭 Canva E2E parity sweep — next-build priority + 4 new scope-gate greenlights
+- **Context:** After the Canva end-to-end audit + in-scope fix batch (see STANDUP 2026-06-14), CEO chose
+  the next build and ruled on the new GAP-GATEs the audit surfaced.
+- **Decisions (Anuj, 2026-06-14):**
+  1. **Next build = CC0 stock + music library** (the #1 adoption hole; onboarding funnel currently
+     dead-ends in an empty editor). Already approved 06-05; now prioritized first. (Content/license
+     sub-gate queued above.)
+  2. ✅ **Greenlit 4 new scope pulls beyond MVP:** (a) numeric X/Y/W/H transform inputs for canvas
+     elements; (b) canvas background-color + per-image fit; (c) project versioning / restore (the
+     "never lose your work" trust play); (d) media-library search/filter.
+- **Owners:** CC0 library — Pixel/Core/Forge (Scout+Ward on content). Transform inputs + bg/fit — Pixel.
+  Versioning/restore — Core + Pixel. Library search — Pixel. To be sequenced after the CC0 library.
+- **Decided by:** Anuj (CEO) via session Q&A; executed/queued by Atlas.
+
 
 ### 2026-06-10 🧭 Create→export reliability fix + full-roadmap pass (CEO test feedback)
 - **Context:** CEO ran a real creator flow (Travel Recap → edit text → export) and **could not export** —

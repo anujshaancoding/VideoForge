@@ -10,6 +10,7 @@ import { parseCaptions } from '../../lib/captions.js';
 import { resolveManifest } from '../../store/templateStore.js';
 import { isSlotFilled } from '../../lib/templates.js';
 import { Image, Type, Captions, Package, Shapes, Sparkles, ChevronLeft, Upload, Music, AlertTriangle, Pencil, Trash2 } from 'lucide-react';
+import { stockItemsForTab, renderBackgroundToFile, thumbnailCss, STOCK_CATEGORIES, type StockItem } from '../../lib/stockLibrary.js';
 
 // MediaPanel — left rail (§7.A). Three-section rail: Media / Text / Captions.
 // "Import media" does the full real S3 upload flow (presign → PUT → confirm →
@@ -227,7 +228,7 @@ export default function MediaPanel() {
   }, [projectId, registerFromRecord]);
 
   const uploadFile = useCallback(
-    async (file: File) => {
+    async (file: File): Promise<AssetRecord | null> => {
       const kind = kindFromMime(file.type);
       const tempId = crypto.randomUUID();
 
@@ -240,7 +241,7 @@ export default function MediaPanel() {
           { id: tempId, name: file.name, kind, duration: '—', status: 'error', proxyUrl: null, thumbnailUrl: null,
             errorMsg: 'Format not supported. Use MP4/MOV, MP3/WAV/AAC, or JPG/PNG.' },
         ]);
-        return;
+        return null;
       }
       const sizeLimit = SIZE_LIMITS[kind];
       if (file.size > sizeLimit) {
@@ -249,7 +250,7 @@ export default function MediaPanel() {
           { id: tempId, name: file.name, kind, duration: '—', status: 'error', proxyUrl: null, thumbnailUrl: null,
             errorMsg: `Too large — ${kind} files must be under ${formatBytes(sizeLimit)}.` },
         ]);
-        return;
+        return null;
       }
 
       setAssets((prev) => [
@@ -282,7 +283,7 @@ export default function MediaPanel() {
           });
           // remove the temp entry (id changed)
           setAssets((prev) => prev.filter((a) => a.id !== tempId));
-          return;
+          return ready;
         }
 
         const assetId = presign.assetId!;
@@ -320,8 +321,10 @@ export default function MediaPanel() {
             }
           } catch {}
         }
+        return ready;
       } catch (err) {
         updateAsset(tempId, { status: 'error', errorMsg: err instanceof Error ? err.message : String(err) });
+        return null;
       }
     },
     [updateAsset, registerFromRecord],
@@ -526,6 +529,41 @@ export default function MediaPanel() {
     addClipFromAsset(asset.id, track.id, atMs, durationMs);
   };
 
+  // Stock library (generated backgrounds). INVARIANT-SAFE import: a generated
+  // background is NOT a new project construct. We rasterise it to a PNG Blob in the
+  // browser (canvas.toBlob) and push it through the SAME upload pipeline as a user
+  // file (presign → PUT → confirm → poll), so it becomes an ordinary image asset
+  // that already previews (canvas drawImage) and exports (asset:<id> input)
+  // identically. No schema/engine change; preview == export by construction.
+  const [addingStockId, setAddingStockId] = useState<string | null>(null);
+  const handleAddStockItem = useCallback(
+    async (item: StockItem) => {
+      if (addingStockId) return;
+      setAddingStockId(item.id);
+      // Switch to the Media tab so the user sees the new asset land in their library
+      // (with the normal upload→processing→ready card) and where it then appears.
+      setTab('media');
+      try {
+        const file = await renderBackgroundToFile(item);
+        const ready = await uploadFile(file);
+        if (!ready) return; // uploadFile surfaced an error card already
+        registerFromRecord(ready);
+        handleAddToTimeline({
+          id: ready.id,
+          name: ready.filename || item.title,
+          kind: kindFromContentType(ready.contentType),
+          duration: durationLabel(ready.durationMs, kindFromContentType(ready.contentType)),
+          status: 'ready',
+          proxyUrl: ready.proxyUrl,
+          thumbnailUrl: ready.thumbnailUrl,
+        });
+      } finally {
+        setAddingStockId(null);
+      }
+    },
+    [addingStockId, uploadFile, registerFromRecord],
+  );
+
   if (collapsed) {
     return (
       <div className="flex h-full w-full flex-col items-center gap-2 bg-vf-surface-1 py-2">
@@ -555,7 +593,8 @@ export default function MediaPanel() {
           { key: 'elements', label: 'Elements', icon: Shapes },
           { key: 'ai', label: 'AI', icon: Sparkles },
         ] as const).map(({ key, label, icon: Icon }) => {
-          const isCore = ['media','text','captions'].includes(key);
+          // 'stock' is now a live tab (generated backgrounds); elements/ai remain "SOON".
+          const isCore = ['media','text','captions','stock'].includes(key);
           return (
             <Tooltip key={key} label={label}>
               <button
@@ -801,17 +840,65 @@ export default function MediaPanel() {
         </div>
       )}
 
-      {/* Richer placeholder sections for stock / elements / brand / AI (review remaining item, Phase 1/2 per original scope) */}
+      {/* Stock: live generated CC0 backgrounds + an honest "coming soon" note for the
+          external CC0 video/music set still behind the content/license gate. */}
       {(tab as string) === 'stock' && (
-        <div role="tabpanel" className="p-4 text-center text-xs text-vf-text-tertiary">
-          <div className="mb-2"><Package className="h-8 w-8 mx-auto opacity-60" /></div>
-          Stock library<br />Royalty-free video, music, SFX (Phase 2)
+        <div role="tabpanel" className="flex min-h-0 flex-1 flex-col">
+          <div className="shrink-0 px-3 pt-3">
+            <p className="text-xs font-medium text-vf-text-secondary">Backgrounds</p>
+            <p className="mt-0.5 text-2xs text-vf-text-tertiary">
+              Generated solid &amp; gradient backgrounds — no license needed. Click to add at the playhead.
+            </p>
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 pb-3 pt-2 w-full">
+            <div className="grid grid-cols-2 gap-2.5 w-full">
+              {stockItemsForTab('stock').map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  disabled={addingStockId !== null}
+                  onClick={() => void handleAddStockItem(item)}
+                  data-testid="stock-item"
+                  data-stock-id={item.id}
+                  title={`${item.title} — click to add`}
+                  className={cx(
+                    'group flex w-full flex-col overflow-hidden min-w-0 rounded-lg border border-vf-border-subtle bg-vf-surface-2 text-left transition-colors',
+                    addingStockId ? 'cursor-default opacity-60' : 'cursor-pointer hover:border-vf-border-strong',
+                  )}
+                >
+                  <div
+                    className="relative flex aspect-video items-center justify-center overflow-hidden"
+                    style={{ background: thumbnailCss(item) }}
+                  >
+                    {addingStockId === item.id && (
+                      <span
+                        aria-hidden="true"
+                        className="h-5 w-5 animate-spin rounded-full border-2 border-white/30 border-t-white"
+                      />
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1 px-2 py-1.5">
+                    <span aria-hidden="true" className="shrink-0 text-vf-text-tertiary"><Image className="h-4 w-4" /></span>
+                    <span className="truncate text-xs text-vf-text-secondary" title={item.title}>{item.title}</span>
+                  </div>
+                </button>
+              ))}
+            </div>
+            <div className="mt-4 flex items-center gap-2 rounded-lg border border-vf-border-subtle bg-vf-surface-2/60 px-3 py-2.5 text-2xs text-vf-text-tertiary">
+              <Package className="h-4 w-4 shrink-0 opacity-70" aria-hidden="true" />
+              <span>{STOCK_CATEGORIES.stock.comingSoon}</span>
+            </div>
+          </div>
         </div>
       )}
+      {/* Elements: intentionally empty — shapes/stickers can't yet export
+          (buildFilterComplex omits image/shape/lottie/sticker overlays), so adding
+          them would break preview == export. Honest "coming soon" until the gate. */}
       {(tab as string) === 'elements' && (
-        <div role="tabpanel" className="p-4 text-center text-xs text-vf-text-tertiary">
-          <div className="mb-2"><Shapes className="h-8 w-8 mx-auto opacity-60" /></div>
-          Elements &amp; overlays<br />Lottie, shapes, stickers (Phase 2)
+        <div role="tabpanel" className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 p-6 text-center">
+          <Shapes className="h-8 w-8 text-vf-text-tertiary opacity-60" aria-hidden="true" />
+          <p className="text-sm font-medium text-vf-text-secondary">Elements &amp; stickers</p>
+          <p className="text-2xs text-vf-text-tertiary">{STOCK_CATEGORIES.elements.comingSoon}</p>
         </div>
       )}
       {(tab as string) === 'ai' && (
