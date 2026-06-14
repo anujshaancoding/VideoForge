@@ -5,6 +5,7 @@ import {
   duplicateProject,
   listProjects,
   relativeTime,
+  renameProject,
   type ProjectSummary,
 } from "../lib/projectStore.js";
 import { Button, Modal } from "../components/ui/index.js";
@@ -36,16 +37,21 @@ function ProjectCard({
   onOpen,
   onDuplicate,
   onDelete,
+  onRename,
   busy,
 }: {
   project: ProjectSummary;
   onOpen: () => void;
   onDuplicate: () => void;
   onDelete: () => void;
+  onRename: (newTitle: string) => void;
   busy: boolean;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [isRenaming, setIsRenaming] = useState(false);
+  const [draft, setDraft] = useState(project.title);
   const menuRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -55,6 +61,19 @@ function ProjectCard({
     document.addEventListener("mousedown", dismiss);
     return () => document.removeEventListener("mousedown", dismiss);
   }, [menuOpen]);
+
+  // When entering rename mode, focus and select the text (F18)
+  useEffect(() => {
+    if (isRenaming && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [isRenaming]);
+
+  // Visual preview "stage" for the card — makes projects feel real and desirable (product review feedback).
+  // Uses the project's actual aspect for the preview frame + a subtle "video" treatment.
+  const previewRatio = project.width / project.height;
+  const isVertical = previewRatio < 1;
 
   return (
     <li className="relative">
@@ -75,14 +94,30 @@ function ProjectCard({
           onClick={onOpen}
           className="absolute inset-0 z-0 cursor-pointer rounded-xl outline-none focus-visible:ring-2 focus-visible:ring-vf-accent"
         />
-        <div className="pointer-events-none relative flex aspect-video items-center justify-center bg-vf-surface-2">
-          <AspectGlyph width={project.width} height={project.height} />
+        <div
+          className="pointer-events-none relative flex items-center justify-center overflow-hidden bg-vf-surface-sunken"
+          style={{ aspectRatio: previewRatio }}
+        >
+          {/* "Video frame" treatment: dark stage + subtle inner frame to feel like a real preview */}
+          <div
+            className="relative flex items-center justify-center rounded-sm border border-vf-border-subtle/60 bg-[#0f0f12]"
+            style={{
+              width: isVertical ? '48%' : '72%',
+              aspectRatio: previewRatio,
+            }}
+          >
+            <AspectGlyph width={project.width} height={project.height} />
+            {/* Play affordance to signal "this is video content" */}
+            <span aria-hidden="true" className="absolute text-xl text-vf-text-tertiary/70">▶</span>
+          </div>
+
           {busy && (
             <div className="absolute inset-0 flex items-center justify-center bg-vf-overlay-scrim text-xs text-vf-text-secondary">
               Working…
             </div>
           )}
-          <span className="absolute bottom-2 left-2 inline-flex items-center gap-1 rounded-pill bg-vf-surface-sunken/80 px-2 py-0.5 text-2xs text-vf-text-secondary">
+
+          <span className="absolute bottom-2 left-2 inline-flex items-center gap-1 rounded-pill bg-black/60 px-2 py-0.5 text-2xs text-vf-text-primary backdrop-blur">
             <AspectGlyph width={project.width} height={project.height} />
             {project.aspectRatio === "custom"
               ? `${project.width}×${project.height}`
@@ -90,10 +125,40 @@ function ProjectCard({
           </span>
         </div>
         <div className="relative flex items-center justify-between gap-2 px-3 py-2">
-          <div className="pointer-events-none min-w-0">
-            <div className="truncate text-sm font-medium text-vf-text-primary" title={project.title}>
-              {project.title}
-            </div>
+          <div className="min-w-0 flex-1">
+            {isRenaming ? (
+              <input
+                ref={inputRef}
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    const trimmed = draft.trim();
+                    if (trimmed && trimmed !== project.title) {
+                      onRename(trimmed);
+                    }
+                    setIsRenaming(false);
+                  }
+                  if (e.key === "Escape") {
+                    setIsRenaming(false);
+                    setDraft(project.title);
+                  }
+                }}
+                onBlur={() => {
+                  const trimmed = draft.trim();
+                  if (trimmed && trimmed !== project.title) {
+                    onRename(trimmed);
+                  }
+                  setIsRenaming(false);
+                }}
+                className="w-full text-sm font-medium bg-vf-surface-2 border border-vf-accent rounded px-1 py-0.5 text-vf-text-primary"
+                onClick={(e) => e.stopPropagation()}
+              />
+            ) : (
+              <div className="truncate text-sm font-medium text-vf-text-primary" title={project.title}>
+                {project.title}
+              </div>
+            )}
             <div className="text-xs text-vf-text-tertiary" title={project.updatedAt}>
               {relativeTime(project.updatedAt)}
             </div>
@@ -132,6 +197,18 @@ function ProjectCard({
             }}
           >
             Open
+          </button>
+          <button
+            role="menuitem"
+            type="button"
+            className="block w-full px-3 py-1.5 text-left text-sm text-vf-text-primary hover:bg-vf-surface-4"
+            onClick={() => {
+              setMenuOpen(false);
+              setIsRenaming(true);
+              setDraft(project.title);
+            }}
+          >
+            Rename
           </button>
           <button
             role="menuitem"
@@ -271,6 +348,20 @@ export default function Dashboard() {
     [refresh],
   );
 
+  const handleRename = useCallback(
+    (id: string, newTitle: string) => {
+      setBusyId(id);
+      try {
+        renameProject(id, newTitle);
+        // Refresh the list so the card title updates (works for both LS and API paths via listProjects)
+        void refresh();
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [refresh],
+  );
+
   const confirmDelete = useCallback(async () => {
     if (!pendingDelete) return;
     const id = pendingDelete.id;
@@ -320,7 +411,7 @@ export default function Dashboard() {
             </p>
             <div className="mt-8">
               {/* Non-amber: amber is reserved for the single Export CTA + brand (§2.3). */}
-              <Button variant="secondary" size="lg" onClick={() => navigate("/new")}>
+              <Button variant="secondary" size="lg" onClick={() => navigate("/new")} data-testid="new-project-btn">
                 + New project
               </Button>
             </div>
@@ -330,7 +421,7 @@ export default function Dashboard() {
             <div className="mb-6 flex items-center justify-between">
               <h1 className="text-xl font-bold text-vf-text-primary">Your projects</h1>
               {/* Non-amber: amber is reserved for the single Export CTA + brand (§2.3). */}
-              <Button variant="secondary" onClick={() => navigate("/new")}>
+              <Button variant="secondary" onClick={() => navigate("/new")} data-testid="new-project-btn">
                 + New
               </Button>
             </div>
@@ -343,6 +434,7 @@ export default function Dashboard() {
                 <button
                   type="button"
                   onClick={() => navigate("/new")}
+                  data-testid="new-project-btn"
                   className="flex h-full min-h-[180px] w-full flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-vf-border-default bg-vf-surface-1 text-vf-text-secondary hover:border-vf-border-strong hover:bg-vf-surface-2"
                 >
                   <span aria-hidden="true" className="text-2xl">
@@ -359,6 +451,7 @@ export default function Dashboard() {
                   onOpen={() => navigate(`/editor/${p.id}`)}
                   onDuplicate={() => handleDuplicate(p.id)}
                   onDelete={() => setPendingDelete(p)}
+                  onRename={(newTitle) => handleRename(p.id, newTitle)}
                 />
               ))}
             </ul>

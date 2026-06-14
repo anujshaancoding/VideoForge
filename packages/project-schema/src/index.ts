@@ -93,6 +93,7 @@ export function newProject(opts: NewProjectOptions): Project {
         muted: false,
         solo: false,
         locked: false,
+        hidden: false,
         clips: [],
       },
     ],

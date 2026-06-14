@@ -18,12 +18,14 @@ test.describe("Dashboard", () => {
   });
 
   test("project card ⋯ menu opens on click", async ({ page }) => {
-    await page.getByTestId("project-actions-btn").first().click();
+    await page.getByTestId("project-actions-btn").first().waitFor({ state: "visible", timeout: 15000 });
+  await page.getByTestId("project-actions-btn").first().click();
     await expect(page.getByTestId("project-card-menu")).toBeVisible();
   });
 
   test("project card menu closes when clicking outside", async ({ page }) => {
-    await page.getByTestId("project-actions-btn").first().click();
+    await page.getByTestId("project-actions-btn").first().waitFor({ state: "visible", timeout: 15000 });
+  await page.getByTestId("project-actions-btn").first().click();
     await expect(page.getByTestId("project-card-menu")).toBeVisible();
     // Click the page background (outside the menu).
     await page.mouse.click(10, 10);
@@ -31,7 +33,8 @@ test.describe("Dashboard", () => {
   });
 
   test("menu has Open / Duplicate / Delete items", async ({ page }) => {
-    await page.getByTestId("project-actions-btn").first().click();
+    await page.getByTestId("project-actions-btn").first().waitFor({ state: "visible", timeout: 15000 });
+  await page.getByTestId("project-actions-btn").first().click();
     const menu = page.getByTestId("project-card-menu");
     await expect(menu.getByRole("menuitem", { name: "Open" })).toBeVisible();
     await expect(menu.getByRole("menuitem", { name: "Duplicate" })).toBeVisible();
@@ -39,14 +42,16 @@ test.describe("Dashboard", () => {
   });
 
   test("Duplicate creates a copy card", async ({ page }) => {
-    await page.getByTestId("project-actions-btn").first().click();
+    await page.getByTestId("project-actions-btn").first().waitFor({ state: "visible", timeout: 15000 });
+  await page.getByTestId("project-actions-btn").first().click();
     await page.getByRole("menuitem", { name: "Duplicate" }).click();
     await expect(page.getByText("Summer Sale Promo (copy)")).toBeVisible();
   });
 
   test("Delete shows confirm modal then removes the project", async ({ page }) => {
     // Create a fresh project we can safely delete.
-    await page.getByTestId("project-actions-btn").first().click();
+    await page.getByTestId("project-actions-btn").first().waitFor({ state: "visible", timeout: 15000 });
+  await page.getByTestId("project-actions-btn").first().click();
     await page.getByRole("menuitem", { name: "Duplicate" }).click();
     await expect(page.getByText("Summer Sale Promo (copy)")).toBeVisible();
 
@@ -69,7 +74,8 @@ test.describe("Dashboard", () => {
   });
 
   test("Open project navigates to editor", async ({ page }) => {
-    await page.getByTestId("project-actions-btn").first().click();
+    await page.getByTestId("project-actions-btn").first().waitFor({ state: "visible", timeout: 15000 });
+  await page.getByTestId("project-actions-btn").first().click();
     await page.getByRole("menuitem", { name: "Open" }).click();
     await expect(page).toHaveURL(/\/editor\//);
   });

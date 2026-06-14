@@ -144,6 +144,7 @@ function makeProject(overlay: TextOverlay): Project {
     muted: false,
     solo: false,
     locked: false,
+    hidden: false,
     clips: [overlay],
   };
   return {

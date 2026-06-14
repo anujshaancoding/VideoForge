@@ -152,7 +152,13 @@ export async function createProject(input: CreateProjectInput): Promise<Project>
       frameRate: input.frameRate ?? 30,
     });
   try {
-    await apiCreateProject({ name: project.title, document: project });
+    const resp = (await apiCreateProject({ name: project.title, document: project })) as any;
+    // The server (forceServerOwnedFields) always mints its own id for the row + document.
+    // Use the authoritative id from the response so routing + manifest key + dashboard list match.
+    // Response shape for document-create path is the raw Project (has .id at top level).
+    const serverId: string = resp?.id || project.id;
+    const authoritative = serverId !== project.id ? ({ ...project, id: serverId } as Project) : project;
+    return authoritative;
   } catch {
     // Fallback: persist locally (also covers the in-flight Core POST-document change —
     // until it lands, the document round-trips via localStorage so the editor opens
@@ -160,8 +166,8 @@ export async function createProject(input: CreateProjectInput): Promise<Project>
     const map = lsReadAll();
     map[project.id] = project;
     lsWriteAll(map);
+    return project;
   }
-  return project;
 }
 
 export async function saveProject(

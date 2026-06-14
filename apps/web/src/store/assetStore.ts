@@ -77,5 +77,29 @@ export const useAssetStore = create<AssetState>((set, get) => ({
 
 /** Imperative accessor for non-React consumers (the engines). */
 export function getAssetMeta(id: string): AssetMeta | undefined {
-  return useAssetStore.getState().assets[id];
+  const existing = useAssetStore.getState().assets[id];
+  if (existing) return existing;
+
+  // Demo videos used by templates have real playable content served from /demo-videos/
+  if (id.startsWith("demo-video:")) {
+    const slug = id.replace("demo-video:", "");
+    const thumbMap: Record<string, string> = {
+      "summer-sale": "/demo-videos/summer-sale-thumb.jpg",
+      "product-launch": "/demo-videos/product-launch-thumb.jpg",
+      "ig-reel": "/demo-videos/ig-reel-thumb.jpg",
+    };
+    return {
+      id,
+      kind: "video",
+      contentType: "video/mp4",
+      width: 720,
+      height: 1280,
+      durationMs: null,
+      proxyUrl: `/demo-videos/${slug}-demo.mp4`,
+      thumbnailUrl: thumbMap[slug] || null,
+      waveformUrl: null,
+    };
+  }
+
+  return undefined;
 }

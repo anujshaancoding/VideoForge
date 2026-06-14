@@ -6,6 +6,7 @@ import {
 import { msToTimecode } from "@videoforge/project-schema";
 import { useAutosave, type SaveStatus } from "../../lib/useAutosave.js";
 import { cx } from "../ui/index.js";
+import { Zap } from "lucide-react";
 
 const SAVE_DOT: Record<SaveStatus, string> = {
   saved: "bg-vf-success-fg",
@@ -26,6 +27,10 @@ export default function StatusBar() {
   const pxPerSecond = useEditorStore((s) => s.pxPerSecond);
   const durationMs = useEditorStore(selectProjectDurationMs);
   const saveStatus = useAutosave();
+  const suppressUntil = useEditorStore((s) => s.suppressSaveErrorUntil);
+  const now = Date.now();
+  const effectiveSaveStatus: SaveStatus =
+    saveStatus === "error" && suppressUntil && now < suppressUntil ? "unsaved" : saveStatus;
 
   const zoomPct = Math.round((pxPerSecond / DEFAULT_PX_PER_SECOND) * 100);
 
@@ -42,12 +47,12 @@ export default function StatusBar() {
       <span className="vf-tnum">Zoom {zoomPct}%</span>
 
       <span className="ml-auto flex items-center gap-1 text-vf-text-disabled">
-        <span aria-hidden="true">⚡</span> Performance mode
+        <Zap className="h-3 w-3" aria-hidden="true" /> Performance mode
       </span>
 
       <span className="flex items-center gap-1.5">
-        <span aria-hidden="true" className={cx("h-2 w-2 rounded-full", SAVE_DOT[saveStatus])} />
-        {SAVE_LABEL[saveStatus]}
+        <span aria-hidden="true" className={cx("h-2 w-2 rounded-full", SAVE_DOT[effectiveSaveStatus])} />
+        {SAVE_LABEL[effectiveSaveStatus]}
       </span>
     </div>
   );

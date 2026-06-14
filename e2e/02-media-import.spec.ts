@@ -9,11 +9,19 @@ async function openEditor(page: import("@playwright/test").Page) {
   await page.evaluate(() => localStorage.removeItem("videoforge.projects.v1"));
   await page.reload();
   await page.waitForLoadState("networkidle");
-  // Open the sample project directly.
+  // Open the sample project directly. Use explicit wait (dashboard may render cards after networkidle under SKIP_AUTH).
+  await page.getByTestId("project-actions-btn").first().waitFor({ state: "visible", timeout: 15000 });
   await page.getByTestId("project-actions-btn").first().click();
   await page.getByRole("menuitem", { name: "Open" }).click();
   await page.waitForURL(/\/editor\//);
   await page.waitForLoadState("networkidle");
+
+  // Ensure media rail + import controls are ready (rail can be collapsed, tab may need activation).
+  const expand = page.getByRole('button', { name: /expand media panel/i });
+  if (await expand.isVisible().catch(() => false)) await expand.click();
+  const mediaTab = page.getByRole('tab', { name: /media/i });
+  if (await mediaTab.isVisible().catch(() => false)) await mediaTab.click();
+  await page.getByTestId('import-media-btn').waitFor({ state: 'visible', timeout: 8000 }).catch(() => {});
 }
 
 /**

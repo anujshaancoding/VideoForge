@@ -35,7 +35,7 @@ describe("LoginScreen", () => {
     store.login.mockResolvedValue(undefined);
     const user = userEvent.setup();
     render(
-      <MemoryRouter initialEntries={["/login"]}>
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={["/login"]}>
         <LoginScreen />
       </MemoryRouter>,
     );
@@ -53,7 +53,7 @@ describe("LoginScreen", () => {
     store.login.mockRejectedValue(new ApiError("nope", 401, "InvalidCredentials"));
     const user = userEvent.setup();
     render(
-      <MemoryRouter initialEntries={["/login"]}>
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={["/login"]}>
         <LoginScreen />
       </MemoryRouter>,
     );
@@ -68,7 +68,7 @@ describe("LoginScreen", () => {
 
   it("the submit button is NOT the amber Export accent (brand rule)", () => {
     render(
-      <MemoryRouter initialEntries={["/login"]}>
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={["/login"]}>
         <LoginScreen />
       </MemoryRouter>,
     );
@@ -83,7 +83,7 @@ describe("SignupScreen", () => {
     store.signup.mockResolvedValue(undefined);
     const user = userEvent.setup();
     render(
-      <MemoryRouter initialEntries={["/signup"]}>
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={["/signup"]}>
         <SignupScreen />
       </MemoryRouter>,
     );
@@ -104,7 +104,7 @@ describe("SignupScreen", () => {
     store.signup.mockRejectedValue(new ApiError("taken", 409, "EmailTaken"));
     const user = userEvent.setup();
     render(
-      <MemoryRouter initialEntries={["/signup"]}>
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={["/signup"]}>
         <SignupScreen />
       </MemoryRouter>,
     );

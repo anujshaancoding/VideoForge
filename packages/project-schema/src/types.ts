@@ -123,6 +123,8 @@ export interface TrackBase {
   muted: boolean;
   solo: boolean;
   locked: boolean;
+  /** UI-only: whether the track is hidden in the timeline (does not affect export but is persisted for UX). */
+  hidden: boolean;
 }
 
 /** Per-track audio mix controls (audio-bearing tracks only — finding E-7). */

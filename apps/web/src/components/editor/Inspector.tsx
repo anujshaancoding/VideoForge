@@ -12,13 +12,15 @@ import type {
   CaptionBlock,
   Clip,
   OverlayClip,
+  Project,
   TextOverlay,
   Track,
 } from "@videoforge/project-schema";
 import { msToTimecode } from "@videoforge/project-schema";
-import { Button, cx, Slider } from "../ui/index.js";
+import { Button, cx, Slider, Tooltip } from "../ui/index.js";
 import { resolveManifest } from "../../store/templateStore.js";
 import TemplateSlotPanel from "./TemplateSlotPanel.js";
+import { Music, Video, Type, Trash2, Copy, MousePointer2 } from "lucide-react";
 
 // Inspector — right context panel (§7.B). Content swaps by selection:
 //   • media video clip → Properties (transform + speed) + Color + Keyframes + Ken Burns
@@ -78,39 +80,39 @@ export default function Inspector() {
         aria-label="Inspector"
         className="flex h-full flex-col items-center justify-center gap-2 bg-vf-surface-1 px-6 text-center"
       >
-        <span aria-hidden="true" className="text-2xl text-vf-text-disabled">
-          ◇
-        </span>
+        <MousePointer2 className="h-8 w-8 text-vf-text-disabled" aria-hidden="true" />
         <p className="text-sm text-vf-text-tertiary">Select a clip to edit its properties.</p>
       </aside>
     );
   }
 
-  const header = (icon: string, name: string, sub: string) => (
+  const header = (icon: React.ReactNode, name: string, sub: string) => (
     <div className="flex shrink-0 items-center gap-2 border-b border-vf-border-subtle px-4 py-3">
-      <span aria-hidden="true">{icon}</span>
+      <span aria-hidden="true" className="text-vf-text-secondary">{icon}</span>
       <div className="min-w-0 flex-1">
         <div className="truncate text-sm font-medium text-vf-text-primary">{name}</div>
         <div className="truncate text-2xs text-vf-text-tertiary">{sub}</div>
       </div>
-      <Button
-        variant="ghost"
-        size="sm"
-        aria-label="Delete selected"
-        onClick={deleteSelected}
-        title="Delete (Del)"
-      >
-        ⌫
-      </Button>
-      <Button
-        variant="ghost"
-        size="sm"
-        aria-label="Duplicate selected"
-        onClick={duplicateSelected}
-        title="Duplicate (Ctrl+D)"
-      >
-        ⧉
-      </Button>
+      <Tooltip label="Delete">
+        <Button
+          variant="ghost"
+          size="sm"
+          aria-label="Delete selected"
+          onClick={deleteSelected}
+        >
+          <Trash2 className="h-4 w-4" />
+        </Button>
+      </Tooltip>
+      <Tooltip label="Duplicate">
+        <Button
+          variant="ghost"
+          size="sm"
+          aria-label="Duplicate selected"
+          onClick={duplicateSelected}
+        >
+          <Copy className="h-4 w-4" />
+        </Button>
+      </Tooltip>
     </div>
   );
 
@@ -128,14 +130,25 @@ export default function Inspector() {
       {selection.kind === "clip" && clip ? (
         clipTrack && (clipTrack.type === "audio" || clipTrack.type === "voiceover") ? (
           <>
-            {header("♪", `audio ${clip.id.slice(0, 6)}`, clipTrack.name)}
+            {header(<Music className="h-4 w-4" />, `audio ${clip.id.slice(0, 6)}`, clipTrack.name)}
             <div className="min-h-0 flex-1 overflow-y-auto p-4">
               <AudioInspector clip={clip} track={clipTrack} />
             </div>
           </>
         ) : (
           <>
-            {header("▣", `clip ${clip.id.slice(0, 6)}`, clipTrack?.name ?? "")}
+            {(() => {
+              // If this clip is the target of a template slot, surface that in the header for clarity
+              // ("this clip is filling the 'Moment 1' slot").
+              let sub = clipTrack?.name ?? '';
+              if (manifest) {
+                const slotForClip = manifest.slots.find(s => s.target.type === 'clip' && s.target.clipId === clip.id);
+                if (slotForClip) {
+                  sub = `Slot: ${slotForClip.label} • ${sub}`.trim();
+                }
+              }
+              return header(<Video className="h-4 w-4" />, `clip ${clip.id.slice(0, 6)}`, sub);
+            })()}
             <div className="min-h-0 flex-1 overflow-y-auto p-4">
               <VideoClipInspector clip={clip} />
             </div>
@@ -143,11 +156,13 @@ export default function Inspector() {
         )
       ) : selection.kind === "overlay" && overlay ? (
         <>
-          {header("T", overlay.kind === "text" ? `"${(overlay as TextOverlay).text}"` : overlay.kind, overlayTrack?.name ?? "")}
+          {header(<Type className="h-4 w-4" />, overlay.kind === "text" ? `"${(overlay as TextOverlay).text}"` : overlay.kind, overlayTrack?.name ?? "")}
           <div className="min-h-0 flex-1 overflow-y-auto p-4">
             <OverlayInspector overlay={overlay} />
           </div>
         </>
+      ) : selection.kind === "track" ? (
+        <TrackInspector trackId={selection.id} project={project} />
       ) : (
         <div className="flex flex-1 items-center justify-center p-6 text-center text-sm text-vf-text-tertiary">
           Selected a {selection.kind}; no inspector for this type yet.
@@ -542,6 +557,78 @@ function AudioInspector({ clip, track }: { clip: Clip; track: Track | null }) {
   );
 }
 
+// ── Basic track inspector (for selection after "add track") ──────────────────────
+function TrackInspector({ trackId, project }: { trackId: string | null; project: Project }) {
+  const track = project.tracks.find((t: Track) => t.id === trackId) ?? null;
+  const setTrackVolume = useEditorStore((s) => s.setTrackVolume);
+  const setTrackPan = useEditorStore((s) => s.setTrackPan);
+  const setTrackMute = useEditorStore((s) => s.setTrackMute);
+  const setTrackSolo = useEditorStore((s) => s.setTrackSolo);
+
+  if (!track) {
+    return <div className="p-4 text-sm text-vf-text-tertiary">Track not found.</div>;
+  }
+
+  const isAudioTrack = track.type === "audio" || track.type === "voiceover";
+  const vol = (track as any).volume ?? 100;
+  const pan = (track as any).pan ?? 0;
+  const muted = (track as any).muted ?? false;
+  const solo = (track as any).solo ?? false;
+
+  return (
+    <aside role="complementary" aria-label="Track inspector" className="flex h-full min-h-0 flex-col bg-vf-surface-1">
+      <div className="flex shrink-0 items-center gap-2 border-b border-vf-border-subtle px-4 py-3">
+        <span aria-hidden="true">▤</span>
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-sm font-medium text-vf-text-primary">{track.name || `${track.type} track`}</div>
+          <div className="truncate text-2xs text-vf-text-tertiary">{track.type} · {project.tracks.filter((t) => t.type === track.type).length} total</div>
+        </div>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto p-4">
+        <Section title="Track">
+          <label className="flex items-center justify-between text-xs">
+            <span>Muted</span>
+            <input type="checkbox" checked={muted} onChange={(e) => setTrackMute(track.id, e.target.checked)} />
+          </label>
+          <label className="flex items-center justify-between text-xs">
+            <span>Solo</span>
+            <input type="checkbox" checked={solo} onChange={(e) => setTrackSolo(track.id, e.target.checked)} />
+          </label>
+
+          {isAudioTrack && (
+            <>
+              <Slider
+                label="Volume"
+                value={vol}
+                min={0}
+                max={200}
+                valueLabel={`${vol}%`}
+                onChange={(v) => setTrackVolume(track.id, v)}
+              />
+              <Slider
+                label="Pan"
+                value={pan}
+                min={-100}
+                max={100}
+                valueLabel={pan === 0 ? "C" : pan < 0 ? `${-pan}L` : `${pan}R`}
+                onChange={(v) => setTrackPan(track.id, v)}
+              />
+            </>
+          )}
+        </Section>
+
+        <p className="text-2xs text-vf-text-tertiary">
+          {isAudioTrack
+            ? "Track settings apply to all clips on this track. Mute/solo also affect export mix."
+            : "Video track. Clip-level properties (trim, speed, transforms) are edited on individual clips."}
+        </p>
+        <p className="mt-2 text-2xs text-vf-text-tertiary">Drag media onto the track body on the timeline to add clips.</p>
+      </div>
+    </aside>
+  );
+}
+
 // ── Text overlay inspector (drawtext-subset, §7.B.4) — fully wired ────────────────
 function OverlayInspector({ overlay }: { overlay: OverlayClip }) {
   const updateOverlay = useEditorStore((s) => s.updateOverlay);
@@ -549,9 +636,9 @@ function OverlayInspector({ overlay }: { overlay: OverlayClip }) {
   if (overlay.kind !== "text") {
     return (
       <Section title="Properties">
-        <Slider label="Position X" value={Math.round(overlay.canvasX)} min={0} max={100} valueLabel={`${overlay.canvasX.toFixed(0)}%`} onChange={(v) => updateOverlay(overlay.id, { canvasX: v })} />
-        <Slider label="Position Y" value={Math.round(overlay.canvasY)} min={0} max={100} valueLabel={`${overlay.canvasY.toFixed(0)}%`} onChange={(v) => updateOverlay(overlay.id, { canvasY: v })} />
-        <Slider label="Opacity" value={Math.round(overlay.opacity)} min={0} max={100} valueLabel={`${overlay.opacity}%`} onChange={(v) => updateOverlay(overlay.id, { opacity: v })} />
+        <Slider label="Position X" value={Math.round(overlay.canvasX ?? 0)} min={0} max={100} valueLabel={`${(overlay.canvasX ?? 0).toFixed(0)}%`} onChange={(v) => updateOverlay(overlay.id, { canvasX: v })} />
+        <Slider label="Position Y" value={Math.round(overlay.canvasY ?? 0)} min={0} max={100} valueLabel={`${(overlay.canvasY ?? 0).toFixed(0)}%`} onChange={(v) => updateOverlay(overlay.id, { canvasY: v })} />
+        <Slider label="Opacity" value={Math.round(overlay.opacity ?? 100)} min={0} max={100} valueLabel={`${overlay.opacity ?? 100}%`} onChange={(v) => updateOverlay(overlay.id, { opacity: v })} />
       </Section>
     );
   }
@@ -592,13 +679,97 @@ function OverlayInspector({ overlay }: { overlay: OverlayClip }) {
           />
           <span className="text-xs text-vf-text-primary vf-tnum">{t.style.color}</span>
         </div>
+
+        {/* F06: B / I toggles (match Canva floating toolbar). We only write §18-valid
+            TextStyle fields (fontWeight, italic) — both render identically in the
+            FFmpeg export (the graph picks the matching bundled Inter face), so the
+            document always passes export validation. Underline is deferred: drawtext
+            has no underline and it needs a shared text-metrics subsystem to honour the
+            preview==export invariant — see ROADMAP "underline end-to-end". */}
+        <div className="flex items-center gap-2">
+          <label className="w-24 shrink-0 text-xs text-vf-text-secondary">Style</label>
+          <div className="flex gap-1">
+            {[
+              { key: "B", label: "B", title: "Bold (⌘B)", active: (t.style.fontWeight || 600) >= 700, toggle: () => patchStyle({ fontWeight: (t.style.fontWeight || 600) >= 700 ? 400 : 700 }) },
+              { key: "I", label: "I", title: "Italic (⌘I)", active: t.style.italic === true, toggle: () => patchStyle({ italic: !t.style.italic }) },
+            ].map((b) => (
+              <button
+                key={b.key}
+                title={b.title}
+                onClick={b.toggle}
+                aria-pressed={b.active}
+                className={cx(
+                  "h-7 w-7 rounded border text-xs font-semibold",
+                  b.key === "I" && "italic",
+                  b.active
+                    ? "border-vf-accent bg-vf-accent text-white"
+                    : "border-vf-border-default bg-vf-surface-2 text-vf-text-primary hover:bg-vf-surface-3"
+                )}
+              >
+                {b.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* F13: Alignment L/C/R (Shift+⌘L/C/R) */}
+        <div className="flex items-center gap-2">
+          <label className="w-24 shrink-0 text-xs text-vf-text-secondary">Align</label>
+          <div className="flex gap-1">
+            {[
+              { key: "left", label: "L", title: "Left (⇧⌘L)" },
+              { key: "center", label: "C", title: "Center (⇧⌘C)" },
+              { key: "right", label: "R", title: "Right (⇧⌘R)" },
+            ].map((a) => {
+              const active = (t.style.align || "left") === a.key;
+              return (
+                <button
+                  key={a.key}
+                  title={a.title}
+                  onClick={() => patchStyle({ align: a.key as any })}
+                  className={cx(
+                    "h-7 w-7 rounded border text-xs font-semibold",
+                    active
+                      ? "border-vf-accent bg-vf-accent text-white"
+                      : "border-vf-border-default bg-vf-surface-2 text-vf-text-primary hover:bg-vf-surface-3"
+                  )}
+                >
+                  {a.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* F05: Font family selector (searchable list of common fonts) */}
+        <div className="flex items-center gap-2">
+          <label className="w-24 shrink-0 text-xs text-vf-text-secondary">Font</label>
+          <select
+            value={t.style.fontFamily || "Inter"}
+            onChange={(e) => patchStyle({ fontFamily: e.target.value })}
+            className="h-7 flex-1 rounded-sm border border-vf-border-default bg-vf-surface-2 px-1 text-xs text-vf-text-primary"
+            aria-label="Font family"
+          >
+            {[
+              "Inter", "Roboto", "Open Sans", "Lato", "Montserrat", "Oswald", "Raleway",
+              "Poppins", "Playfair Display", "Merriweather", "Source Sans Pro", "Ubuntu",
+              "Nunito", "PT Sans", "Roboto Slab", "Bebas Neue", "Anton", "Pacifico",
+              "Dancing Script", "Caveat",
+            ].map((f) => (
+              <option key={f} value={f} style={{ fontFamily: f }}>
+                {f}
+              </option>
+            ))}
+          </select>
+        </div>
+
         <Slider label="Opacity" value={Math.round(t.opacity)} min={0} max={100} valueLabel={`${t.opacity}%`} onChange={(v) => updateOverlay(t.id, { opacity: v })} />
         <p className="text-2xs text-vf-text-tertiary">ⓘ Styles shown here render identically in your export (no server rasterization).</p>
       </Section>
       <Section title="Properties (transform)">
-        <Slider label="Position X" value={Math.round(t.canvasX)} min={0} max={100} valueLabel={`${t.canvasX.toFixed(0)}%`} onChange={(v) => updateOverlay(t.id, { canvasX: v })} />
-        <Slider label="Position Y" value={Math.round(t.canvasY)} min={0} max={100} valueLabel={`${t.canvasY.toFixed(0)}%`} onChange={(v) => updateOverlay(t.id, { canvasY: v })} />
-        <Slider label="Rotation" value={Math.round(t.rotation)} min={-180} max={180} valueLabel={`${t.rotation.toFixed(0)}°`} onChange={(v) => updateOverlay(t.id, { rotation: v })} />
+        <Slider label="Position X" value={Math.round(t.canvasX ?? 0)} min={0} max={100} valueLabel={`${(t.canvasX ?? 0).toFixed(0)}%`} onChange={(v) => updateOverlay(t.id, { canvasX: v })} />
+        <Slider label="Position Y" value={Math.round(t.canvasY ?? 0)} min={0} max={100} valueLabel={`${(t.canvasY ?? 0).toFixed(0)}%`} onChange={(v) => updateOverlay(t.id, { canvasY: v })} />
+        <Slider label="Rotation" value={Math.round(t.rotation ?? 0)} min={-180} max={180} valueLabel={`${(t.rotation ?? 0).toFixed(0)}°`} onChange={(v) => updateOverlay(t.id, { rotation: v })} />
       </Section>
     </>
   );
@@ -640,6 +811,7 @@ function CaptionEditor({ selectedId }: { selectedId: string | null }) {
           type="file"
           accept=".srt,.vtt"
           aria-hidden="true"
+          aria-label="Import captions .srt or .vtt file"
           tabIndex={-1}
           className="sr-only"
           onChange={handleImport}

@@ -141,18 +141,24 @@ function TemplateCard({
           : "border-vf-border-subtle bg-vf-surface-2 hover:border-vf-border-default hover:bg-vf-surface-3",
       )}
     >
-      {/* Poster region — a representative composite, letterboxed for the 9:16 content.
-          A static gradient stands in until poster WebP assets are bundled (Iris §1.2). */}
-      <div className="relative flex h-[110px] items-center justify-center bg-vf-surface-sunken">
-        <div
-          aria-hidden="true"
-          className="h-[96px] w-[54px] rounded-sm bg-gradient-to-b from-vf-surface-3 to-vf-surface-4"
-        />
+      {/* Visual poster — larger, more "Canva card" like with stronger stage treatment and metadata.
+          This makes choosing a template feel desirable and visual (product review priority). */}
+      <div className="relative flex h-[132px] items-center justify-center overflow-hidden bg-vf-surface-sunken">
+        {/* Inner "video frame" to evoke the final export */}
+        <div className="relative flex h-[108px] w-[62px] items-center justify-center rounded-sm border border-vf-border-subtle/50 bg-[#111] shadow-inner">
+          <div
+            aria-hidden="true"
+            className="h-[92px] w-[52px] rounded-sm bg-gradient-to-b from-vf-surface-3 via-vf-surface-4 to-black/80"
+          />
+          {/* Subtle play affordance */}
+          <span aria-hidden="true" className="absolute text-lg text-white/60">▶</span>
+        </div>
+
         {/* Ratio badge (bottom-left), always visible. */}
-        <span className="absolute bottom-1 left-1 rounded-pill bg-black/56 px-1.5 py-0.5 text-2xs font-medium text-vf-text-primary">
+        <span className="absolute bottom-1 left-1 rounded-pill bg-black/70 px-1.5 py-0.5 text-2xs font-medium text-vf-text-primary backdrop-blur">
           {manifest.aspectRatio}
         </span>
-        {/* Selected → sky-blue check badge (replaces the hover play overlay). */}
+        {/* Selected → sky-blue check badge */}
         {selected && (
           <span
             aria-hidden="true"
@@ -251,12 +257,16 @@ export default function NewProjectModal() {
   };
 
   const focusCard = (index: number) => {
-    const clamped = (index + manifests.length) % manifests.length;
+    const len = visibleManifests.length;
+    if (len === 0) return;
+    const clamped = (index + len) % len;
     cardRefs.current[clamped]?.focus();
-    selectTemplate(manifests[clamped]!);
+    selectTemplate(visibleManifests[clamped]!);
   };
 
   const onCardKeyDown = (index: number) => (e: React.KeyboardEvent) => {
+    const len = visibleManifests.length;
+    if (len === 0) return;
     switch (e.key) {
       case "ArrowRight":
       case "ArrowDown":
@@ -271,7 +281,7 @@ export default function NewProjectModal() {
       case " ":
       case "Enter":
         e.preventDefault();
-        selectTemplate(manifests[index]!);
+        selectTemplate(visibleManifests[index]!);
         break;
     }
   };
@@ -311,14 +321,22 @@ export default function NewProjectModal() {
       // createProject falls back to localStorage on network error and only
       // rejects on unexpected failures — re-enable the button so the user can retry.
       setCreating(false);
+    } finally {
+      // Defensive: ensure the button is not stuck even if navigate races with HMR/reconnect
+      // in dev. The route change will unmount the modal anyway.
+      setCreating(false);
     }
   }, [canCreate, selected, customValidation, title, selectedTemplateId, navigate, setManifestForProject]);
 
   // First tile owns the tabindex when nothing is chosen; otherwise the chosen tile.
   const rovingIndex =
     selected === null ? 0 : Math.max(0, PRESETS.findIndex((p) => p.id === selected));
+  const visibleManifests = selected && selected !== "custom"
+    ? manifests.filter((m) => m.aspectRatio === selected)
+    : manifests;
+
   const cardRovingIndex = selectedTemplateId
-    ? Math.max(0, manifests.findIndex((m) => m.id === selectedTemplateId))
+    ? Math.max(0, visibleManifests.findIndex((m) => m.id === selectedTemplateId))
     : 0;
 
   return (
@@ -336,15 +354,20 @@ export default function NewProjectModal() {
             variant="primary"
             aria-disabled={!canCreate}
             disabled={!canCreate}
-            // Explain WHY the Create button is disabled when no ratio is chosen yet (§19.4).
+            // Only describe the disabled reason when we are actually in the "nothing chosen" state.
             aria-describedby={selected === null ? "vf-create-hint" : undefined}
             onClick={handleCreate}
           >
             {creating ? "Creating…" : selectedTemplateId ? "Use template →" : "Create project"}
           </Button>
-          <span id="vf-create-hint" className="sr-only">
-            Choose an aspect ratio first
-          </span>
+          {/* The hint span is only present in the DOM (and referenced) when the button is disabled.
+              This prevents stale "Choose an aspect ratio first" text from being present or announced
+              when a ratio (including the 9:16 default) or template is already selected. */}
+          {selected === null && (
+            <span id="vf-create-hint" className="sr-only">
+              Choose an aspect ratio first
+            </span>
+          )}
         </>
       }
     >
@@ -431,7 +454,7 @@ export default function NewProjectModal() {
             </div>
           </div>
           <div role="radiogroup" aria-labelledby="tpl-heading" className="grid grid-cols-5 gap-2">
-            {manifests.map((m, i) => (
+            {visibleManifests.map((m, i) => (
               <TemplateCard
                 key={m.id}
                 manifest={m}
@@ -444,6 +467,11 @@ export default function NewProjectModal() {
                 onKeyDown={onCardKeyDown(i)}
               />
             ))}
+            {visibleManifests.length === 0 && selected && selected !== "custom" && (
+              <div className="col-span-5 text-2xs text-vf-text-tertiary italic">
+                No templates available for this aspect ratio yet.
+              </div>
+            )}
           </div>
         </section>
 

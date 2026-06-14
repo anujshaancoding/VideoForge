@@ -71,6 +71,7 @@ export const sampleProject: Project = {
       muted: false,
       solo: false,
       locked: false,
+      hidden: false,
       clips: [
         {
           id: VIDEO_CLIP_A,
@@ -120,6 +121,7 @@ export const sampleProject: Project = {
       muted: false,
       solo: false,
       locked: false,
+      hidden: false,
       volume: 100,
       pan: 0,
       volumeEnvelope: [
@@ -161,6 +163,7 @@ export const sampleProject: Project = {
       muted: false,
       solo: false,
       locked: false,
+      hidden: false,
       volume: 120,
       pan: 0,
       volumeEnvelope: [],
@@ -193,6 +196,7 @@ export const sampleProject: Project = {
       muted: false,
       solo: false,
       locked: false,
+      hidden: false,
       clips: [
         {
           id: TEXT_OVERLAY_ID,
@@ -245,6 +249,7 @@ export const sampleProject: Project = {
       muted: false,
       solo: false,
       locked: false,
+      hidden: false,
       language: "en",
       style: {
         fontFamily: "Inter",

@@ -18,9 +18,9 @@ export interface IconButtonProps extends ButtonHTMLAttributes<HTMLButtonElement>
 }
 
 const sizeClasses: Record<IconButtonSize, string> = {
-  sm: "h-7 w-7", // 28px ≥ 24 target
-  md: "h-8 w-8", // 32px
-  lg: "h-10 w-10", // 40px (transport)
+  sm: "h-9 w-9", // 36px good touch target
+  md: "h-10 w-10", // 40px
+  lg: "h-12 w-12", // 48px (transport play etc)
 };
 
 export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(function IconButton(
@@ -38,7 +38,7 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(functio
         "disabled:cursor-not-allowed disabled:opacity-40",
         active
           ? "bg-vf-surface-3 text-vf-accent-text"
-          : "text-vf-icon-default hover:bg-vf-surface-3 hover:text-vf-text-primary",
+          : "text-vf-text-tertiary hover:bg-vf-surface-3 hover:text-vf-text-primary",
         sizeClasses[size],
         className,
       )}

@@ -74,6 +74,7 @@ export function videoTrack(trackId: string, name: string, clips: Clip[]): VideoT
     muted: false,
     solo: false,
     locked: false,
+    hidden: false,
     clips,
   };
 }
@@ -88,6 +89,7 @@ export function overlayTrack(trackId: string, name: string, clips: TextOverlay[]
     muted: false,
     solo: false,
     locked: false,
+    hidden: false,
     clips,
   };
 }
@@ -102,6 +104,7 @@ export function audioTrack(trackId: string, name: string, clips: Clip[]): AudioT
     muted: false,
     solo: false,
     locked: false,
+    hidden: false,
     volume: 100,
     pan: 0,
     volumeEnvelope: [],
@@ -260,6 +263,7 @@ export function captionTrack(o: {
     muted: false,
     solo: false,
     locked: false,
+    hidden: false,
     language: "en",
     style: {
       fontFamily: "Inter",

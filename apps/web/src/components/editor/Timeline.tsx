@@ -3,6 +3,7 @@ import {
   selectProjectDurationMs,
   useEditorStore,
   type AddTrackKind,
+  DEFAULT_PX_PER_SECOND,
 } from "../../store/editorStore.js";
 import { getAssetMeta } from "../../store/assetStore.js";
 import { msToTimecode } from "@videoforge/project-schema";
@@ -10,6 +11,7 @@ import type { Clip, Track } from "@videoforge/project-schema";
 import { cx, IconButton, Tooltip } from "../ui/index.js";
 import { resolveManifest } from "../../store/templateStore.js";
 import { isSlotFilled } from "../../lib/templates.js";
+import { Plus, Eye, EyeOff, VolumeX, Volume2, Star, Video, Mic, Captions, Layers, Lock } from "lucide-react";
 
 /** Per-clip placeholder-slot info for the dashed timeline block (null = not a placeholder). */
 export interface SlotInfo {
@@ -31,7 +33,7 @@ export interface SlotInfo {
 //     not hundreds, and the doc isn't re-serialised every frame). Hold Alt to
 //     disable snapping.
 
-const HEADER_W = 180; // §2.1 pinned track-header column width
+const HEADER_W = 180; // wider track labels for readability (icon + full name)
 const RULER_H = 32;
 const SNAP_PX = 8; // snap-to-edge threshold in screen pixels (§3.5)
 
@@ -43,12 +45,12 @@ const TRACK_CAPS: Record<AddTrackKind, number> = {
   overlay: 2,
 };
 
-const TYPE_ICON: Record<string, string> = {
-  video: "▣",
-  audio: "🔊",
-  voiceover: "🎙",
-  overlay: "▤",
-  caption: "💬",
+const TYPE_ICON: Record<string, React.ReactNode> = {
+  video: <Video className="h-3.5 w-3.5" aria-hidden="true" />,
+  audio: <Volume2 className="h-3.5 w-3.5" aria-hidden="true" />,
+  voiceover: <Mic className="h-3.5 w-3.5" aria-hidden="true" />,
+  overlay: <Layers className="h-3.5 w-3.5" aria-hidden="true" />,
+  caption: <Captions className="h-3.5 w-3.5" aria-hidden="true" />,
 };
 
 const TYPE_TINT: Record<string, string> = {
@@ -91,25 +93,47 @@ export default function Timeline() {
   const selection = useEditorStore((s) => s.selection);
   const fps = useEditorStore((s) => s.project.canvas.frameRate);
   const durationMs = useEditorStore(selectProjectDurationMs);
+  const projectId = useEditorStore((s) => s.project.id);
 
   const setPlayhead = useEditorStore((s) => s.setPlayhead);
   const select = useEditorStore((s) => s.select);
   const moveClip = useEditorStore((s) => s.moveClip);
   const trimClip = useEditorStore((s) => s.trimClip);
   const addTrack = useEditorStore((s) => s.addTrack);
+  const setZoom = useEditorStore((s) => s.setZoom);
   const addClipFromAsset = useEditorStore((s) => s.addClipFromAsset);
   const deleteSelected = useEditorStore((s) => s.deleteSelected);
   const duplicateSelected = useEditorStore((s) => s.duplicateSelected);
   const splitAtPlayhead = useEditorStore((s) => s.splitAtPlayhead);
   const setTrackMute = useEditorStore((s) => s.setTrackMute);
   const setTrackSolo = useEditorStore((s) => s.setTrackSolo);
+  const setTrackHidden = useEditorStore((s) => (s as any).setTrackHidden);
+  const moveTrack = useEditorStore((s) => (s as any).moveTrack);
+  const replaceClipAsset = useEditorStore((s) => s.replaceClipAsset);
   const addCrossfade = useEditorStore((s) => s.addCrossfade);
   const detachAudio = useEditorStore((s) => s.detachAudio);
-  const setZoom = useEditorStore((s) => s.setZoom);
 
   const bodyRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
   const [preview, setPreview] = useState<DragPreview | null>(null);
+
+  // Measure the visible width of the timeline body so we can stretch the
+  // content area (ruler + tracks) to at least the full viewport width when
+  // the project duration is short. This prevents the timeline from looking
+  // "cropped" with a big empty dark area on the right.
+  const [viewportWidth, setViewportWidth] = useState(0);
+
+  useEffect(() => {
+    const body = bodyRef.current;
+    if (!body) return;
+
+    const update = () => setViewportWidth(body.clientWidth || 0);
+    update();
+
+    const ro = new ResizeObserver(update);
+    ro.observe(body);
+    return () => ro.disconnect();
+  }, []);
 
   // Right-click context menu on media clips.
   const [clipCtx, setClipCtx] = useState<{
@@ -135,8 +159,15 @@ export default function Timeline() {
   }, [trackCtx]);
 
   const pxPerMs = pxPerSecond / 1000;
-  // The content width spans the project duration plus a tail of empty room.
-  const contentWidthPx = Math.max(800, (durationMs + 4000) * pxPerMs);
+  // The content width spans the project duration plus a small tail of empty room for
+  // playhead overshoot and new-clip drops.
+  const calculatedContentWidth = Math.max(400, (durationMs + 300) * pxPerMs);
+  // Stretch the inner content (ruler + track bodies) to at least the visible
+  // viewport width. This makes the timeline always "full width stretched" even
+  // when the project is short/empty or the user has zoomed in. Without this the
+  // backgrounds and ruler stop early, leaving a large cropped-looking dark area
+  // on the right (as reported).
+  const contentWidthPx = Math.max(calculatedContentWidth, viewportWidth);
 
   // Empty-state hint (§6.3): show a centered prompt while no media/overlay clips exist.
   // Caption-only blocks don't count as "real" timeline content for the first-clip aha.
@@ -155,17 +186,45 @@ export default function Timeline() {
   // Template placeholder slots → dashed clip blocks with a "N of M" badge. Only
   // UNFILLED media slots render as placeholders (a filled slot is a normal clip).
   const project = useEditorStore((s) => s.project);
+  const clientPlaceholderLabels = useEditorStore((s) => s.placeholderLabels);
   const placeholderSlots = useMemo<Map<string, SlotInfo>>(() => {
     const map = new Map<string, SlotInfo>();
     const manifest = resolveManifest(project);
-    if (!manifest) return map;
-    for (const slot of manifest.slots) {
-      if (slot.target.type !== "clip") continue;
-      if (isSlotFilled(project, slot)) continue;
-      map.set(slot.target.clipId, { label: slot.label, index: slot.index, total: slot.total });
+    if (manifest) {
+      for (const slot of manifest.slots) {
+        if (slot.target.type !== "clip") continue;
+        if (isSlotFilled(project, slot)) continue;
+        map.set(slot.target.clipId, { label: slot.label, index: slot.index, total: slot.total });
+      }
+    }
+    // Also support client-driven placeholders from TemplatesPanel (synthetic templates without full manifest)
+    for (const [clipId, label] of Object.entries(clientPlaceholderLabels || {})) {
+      if (!map.has(clipId)) {
+        map.set(clipId, { label, index: 1, total: 1 });
+      }
     }
     return map;
-  }, [project]);
+  }, [project, clientPlaceholderLabels]);
+
+  // Auto-fit zoom so the project duration fills the visible timeline body on load / when duration changes.
+  // This prevents a 3-second project from showing 8 minutes of empty ruler space (the #1 timeline complaint).
+  // Only triggers when the current zoom is close to default (user hasn't manually zoomed yet for this project).
+  useEffect(() => {
+    const body = bodyRef.current;
+    if (!body || durationMs < 100) return;
+
+    const current = pxPerSecond;
+    const isDefaultish = Math.abs(current - DEFAULT_PX_PER_SECOND) < 40;
+    if (!isDefaultish) return;
+
+    const availWidth = body.clientWidth || 800;
+    const ideal = availWidth / (durationMs / 1000);
+    const clamped = Math.max(20, Math.min(600, ideal));
+
+    if (Math.abs(clamped - current) > 8) {
+      setZoom(clamped);
+    }
+  }, [projectId, durationMs]);
 
   // ── Ruler ticks: adapt density to zoom so labels never collide. ──
   const tickEverySec = useMemo(() => {
@@ -176,10 +235,28 @@ export default function Timeline() {
 
   const ticks = useMemo(() => {
     const out: number[] = [];
-    const totalSec = contentWidthPx / pxPerSecond;
+    // Only generate ticks/labels up to the real project duration.
+    // The stretched contentWidthPx (for backgrounds) may be larger to fill the
+    // viewport, but we don't want phantom timecodes in the right-hand padding area.
+    const totalSec = calculatedContentWidth / pxPerSecond;
     for (let t = 0; t <= totalSec; t += tickEverySec) out.push(t);
     return out;
-  }, [contentWidthPx, pxPerSecond, tickEverySec]);
+  }, [calculatedContentWidth, pxPerSecond, tickEverySec]);
+
+  // Ruler tick labels use a friendly seconds + hundredths format for sub-second ticks.
+  // This prevents the frame field (from msToTimecode) from being misinterpreted as "seconds"
+  // or "mini seconds" on the visual ruler (the main current-time display still uses pro timecode).
+  const formatRulerTick = (seconds: number): string => {
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    const pad2 = (n: number) => String(Math.floor(n)).padStart(2, '0');
+    if (tickEverySec < 1) {
+      const wholeS = Math.floor(s);
+      const hundredths = Math.floor((s - wholeS) * 100);
+      return `${m}:${pad2(wholeS)}.${String(hundredths).padStart(2, '0')}`;
+    }
+    return `${m}:${pad2(s)}`;
+  };
 
   const seekFromClientX = (clientX: number): void => {
     const body = bodyRef.current;
@@ -241,6 +318,16 @@ export default function Timeline() {
     e.stopPropagation();
     if (track.locked) return;
     select("clip", clip.id);
+
+    // If this is a placeholder (manifest slot or client label from Templates apply),
+    // immediately request the Media panel so the user can fill it. Do this on pointerDown
+    // (before any capture) so it is reliable even when onClick would be suppressed.
+    const phLabel = (useEditorStore.getState().placeholderLabels || {})[clip.id];
+    const isPh = !!phLabel || placeholderSlots.has(clip.id);
+    if (isPh && mode === "move") {
+      (useEditorStore.getState() as any).requestOpenMediaForPlaceholder?.(clip.id);
+    }
+
     (e.target as Element).setPointerCapture?.(e.pointerId);
     setDrag({
       clipId: clip.id,
@@ -310,6 +397,18 @@ export default function Timeline() {
     setPreview(null);
   };
 
+  // Ctrl/Cmd + wheel on timeline bodies → horizontal zoom (industry NLE standard).
+  // Without modifier, wheel does normal x-scroll (or y on ancestor for track list).
+  // This replaces the previous "scroll always scrolls tracks vertically" behavior when mod is held.
+  const onWheel = (e: React.WheelEvent) => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const factor = e.deltaY < 0 ? 1.12 : 0.88; // up=zoom in, down=zoom out
+      const next = Math.max(10, Math.min(800, pxPerSecond * factor));
+      setZoom(next);
+    }
+  };
+
   // Called by TrackBody when an asset is dropped onto a lane from the MediaPanel.
   const handleDropClip = (assetId: string, clientX: number, trackId: string): void => {
     const body = bodyRef.current;
@@ -320,6 +419,37 @@ export default function Timeline() {
     // Snap the drop to nearby edges + playhead too.
     const snapped = snapMs(dropMs, snapEdgesFor(assetId));
     if (snapped.dist !== Infinity) dropMs = snapped.ms;
+
+    // For template projects: if dropping on a track that has an unfilled slot, fill that slot
+    // instead of adding a duplicate clip. This makes drag-to-slot work naturally.
+    const proj = useEditorStore.getState().project;
+    const manifest = resolveManifest(proj);
+    if (manifest) {
+      const unfilledSlot = manifest.slots.find(
+        (s) => s.target.type === 'clip' && s.target.trackId === trackId && !isSlotFilled(proj, s)
+      );
+      if (unfilledSlot && unfilledSlot.target.type === 'clip') {
+        const meta = getAssetMeta(assetId);
+        // Fill via drop when landing on an unfilled slot's track. Keeps slot count,
+        // timeline labels ("drop..." → real clip), canvas, and export snapshot in sync.
+        //
+        // The fill is NOT gated on proxyUrl/thumbnailUrl being resolved: the §18
+        // document references media by assetId only and isSlotFilled() flips on the
+        // assetId, so the slot reads as filled the instant it's dropped. Previously a
+        // just-uploaded clip dropped before its proxy finished probing fell through to
+        // "add a duplicate clip" and left the slot a placeholder — the reported
+        // "5 unfilled slots / timeline still says drop photo/video" bug. The playable
+        // proxy streams into the preview a moment later via the asset registry.
+        replaceClipAsset(
+          unfilledSlot.target.clipId,
+          unfilledSlot.target.trackId,
+          assetId,
+          meta?.durationMs ?? undefined,
+        );
+        return;
+      }
+    }
+
     const durationMs = getAssetMeta(assetId)?.durationMs ?? undefined;
     addClipFromAsset(assetId, trackId, dropMs, durationMs);
   };
@@ -338,12 +468,36 @@ export default function Timeline() {
           </span>
           <AddTrackMenu tracks={tracks} onAdd={addTrack} />
         </div>
-        {/* Ruler (click to jump, drag to scrub) */}
+        {/* Ruler (click to jump, drag to scrub — continuous live playhead like Premiere/DaVinci/Canva) */}
         <div className="relative flex-1 overflow-hidden bg-vf-surface-sunken">
           <div
             className="relative h-full cursor-pointer"
             style={{ width: contentWidthPx }}
-            onPointerDown={(e) => seekFromClientX(e.clientX)}
+            onPointerDown={(e) => {
+              // Immediate jump
+              seekFromClientX(e.clientX);
+              // Capture and listen on window so drag anywhere (left/right) continuously scrubs
+              // without requiring the pointer to stay exactly over the ruler pixels.
+              const target = e.currentTarget as Element;
+              target.setPointerCapture?.(e.pointerId);
+              const onMove = (ev: PointerEvent) => {
+                seekFromClientX(ev.clientX);
+              };
+              const onUp = () => {
+                window.removeEventListener("pointermove", onMove);
+                window.removeEventListener("pointerup", onUp);
+                window.removeEventListener("pointercancel", onUp);
+                try { target.releasePointerCapture?.(e.pointerId); } catch {}
+              };
+              window.addEventListener("pointermove", onMove);
+              window.addEventListener("pointerup", onUp);
+              window.addEventListener("pointercancel", onUp);
+            }}
+            onContextMenu={(e) => {
+              // Suppress native browser context menu on ruler (timeline surface should be ours)
+              e.preventDefault();
+              e.stopPropagation();
+            }}
           >
             {ticks.map((t) => (
               <div
@@ -352,7 +506,7 @@ export default function Timeline() {
                 style={{ left: t * pxPerSecond }}
               >
                 <span className="absolute left-1 top-1 text-2xs text-vf-ruler-tick vf-tnum">
-                  {msToTimecode(t * 1000, fps)}
+                  {formatRulerTick(t)}
                 </span>
               </div>
             ))}
@@ -387,6 +541,7 @@ export default function Timeline() {
               onSelect={() => select("track", track.id)}
               onMute={(v) => setTrackMute(track.id, v)}
               onSolo={(v) => setTrackSolo(track.id, v)}
+              onHidden={(v) => setTrackHidden && setTrackHidden(track.id, v)}
               onContextMenu={(x, y) => {
                 select("track", track.id);
                 setTrackCtx({ trackId: track.id, x, y });
@@ -396,7 +551,7 @@ export default function Timeline() {
         </div>
 
         {/* Track bodies (scroll H). */}
-        <div ref={bodyRef} className="relative min-w-0 flex-1 overflow-x-auto">
+        <div ref={bodyRef} className="relative min-w-0 flex-1 overflow-x-auto" onWheel={onWheel}>
           <div
             className="relative"
             style={{ width: contentWidthPx }}
@@ -433,7 +588,18 @@ export default function Timeline() {
               />
             )}
 
-            {/* Draggable red playhead, full body height (§6.3). */}
+            {/* Visual red playhead line - pointer-events-none so it never steals clicks from clips or trim handles underneath.
+                The line stays visually on top (high z-sticky) for position feedback. */}
+            <div
+              aria-hidden="true"
+              className="absolute top-0 z-sticky h-full w-[2px] bg-vf-playhead pointer-events-none"
+              style={{ left: playheadMs * pxPerMs }}
+            />
+
+            {/* Interactive playhead head (small top hit area + triangle). Only ~30px tall at the top (ruler area),
+                so it does not overlap clip bodies. The hit area is widened to ~24px for easier grabbing.
+                Dragging the head or using ruler scrub moves the playhead.
+                This fixes P0 "clip body drag moves playhead" (the 2px line is now purely visual, pointer-events-none). */}
             <div
               role="slider"
               aria-label="Playhead"
@@ -454,12 +620,13 @@ export default function Timeline() {
                 if (e.key === "ArrowLeft") setPlayhead(Math.max(0, playheadMs - frame));
                 if (e.key === "ArrowRight") setPlayhead(playheadMs + frame);
               }}
-              className="absolute top-0 z-sticky h-full w-0.5 cursor-ew-resize bg-vf-playhead"
-              style={{ left: playheadMs * pxPerMs }}
+              className="absolute top-0 z-sticky cursor-ew-resize"
+              style={{ left: `calc(${playheadMs * pxPerMs}px - 11px)`, width: 24, height: 32 }}
+              title={msToTimecode(playheadMs, fps)}
             >
               <span
                 aria-hidden="true"
-                className="absolute -left-[5px] -top-0.5 h-0 w-0 border-x-[6px] border-t-[8px] border-x-transparent border-t-vf-playhead"
+                className="absolute left-1/2 -translate-x-1/2 -top-0.5 h-0 w-0 border-x-[7px] border-t-[10px] border-x-transparent border-t-vf-playhead"
               />
             </div>
           </div>
@@ -481,7 +648,73 @@ export default function Timeline() {
             className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs text-vf-text-primary hover:bg-vf-surface-4"
             onClick={() => { splitAtPlayhead(); setClipCtx(null); }}
           >
-            ✂ Split at playhead
+            Split at playhead (S)
+          </button>
+          <button
+            role="menuitem"
+            type="button"
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs text-vf-text-primary hover:bg-vf-surface-4"
+            onClick={() => {
+              const ph = useEditorStore.getState().playheadMs;
+              const c = clipCtx;
+              if (c) {
+                const st = useEditorStore.getState();
+                const proj = st.project;
+                for (const t of proj.tracks) {
+                  if ((t as any).clips) {
+                    const cc = (t as any).clips.find((x: any) => x.id === c.clipId);
+                    if (cc && ph > cc.startOnTimeline + 50 && ph < cc.endOnTimeline - 50) {
+                      st.trimClip(c.clipId, "start", ph);
+                      break;
+                    }
+                  }
+                }
+              }
+              setClipCtx(null);
+            }}
+          >
+            Trim start to playhead (I)
+          </button>
+          <button
+            role="menuitem"
+            type="button"
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs text-vf-text-primary hover:bg-vf-surface-4"
+            onClick={() => {
+              const ph = useEditorStore.getState().playheadMs;
+              const c = clipCtx;
+              if (c) {
+                const st = useEditorStore.getState();
+                const proj = st.project;
+                for (const t of proj.tracks) {
+                  if ((t as any).clips) {
+                    const cc = (t as any).clips.find((x: any) => x.id === c.clipId);
+                    if (cc && ph > cc.startOnTimeline + 50 && ph < cc.endOnTimeline - 50) {
+                      st.trimClip(c.clipId, "end", ph);
+                      break;
+                    }
+                  }
+                }
+              }
+              setClipCtx(null);
+            }}
+          >
+            Trim end to playhead (O)
+          </button>
+          <button
+            role="menuitem"
+            type="button"
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs text-vf-text-primary hover:bg-vf-surface-4"
+            onClick={() => { useEditorStore.getState().copySelected(); setClipCtx(null); }}
+          >
+            Copy (⌘C)
+          </button>
+          <button
+            role="menuitem"
+            type="button"
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs text-vf-text-primary hover:bg-vf-surface-4"
+            onClick={() => { useEditorStore.getState().paste(); setClipCtx(null); }}
+          >
+            Paste (⌘V)
           </button>
           <button
             role="menuitem"
@@ -489,7 +722,7 @@ export default function Timeline() {
             className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs text-vf-text-primary hover:bg-vf-surface-4"
             onClick={() => { duplicateSelected(); setClipCtx(null); }}
           >
-            ⧉ Duplicate
+            Duplicate (⌘D)
           </button>
           <button
             role="menuitem"
@@ -497,7 +730,7 @@ export default function Timeline() {
             className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs text-vf-text-primary hover:bg-vf-surface-4"
             onClick={() => { addCrossfade(clipCtx.clipId); setClipCtx(null); }}
           >
-            ⤫ Crossfade to next
+            Crossfade to next
           </button>
           <button
             role="menuitem"
@@ -505,7 +738,7 @@ export default function Timeline() {
             className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs text-vf-text-primary hover:bg-vf-surface-4"
             onClick={() => { detachAudio(clipCtx.clipId); setClipCtx(null); }}
           >
-            🔗 Detach audio
+            Detach audio
           </button>
           <div className="my-1 border-t border-vf-border-subtle" />
           <button
@@ -514,7 +747,40 @@ export default function Timeline() {
             className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs text-vf-danger-fg hover:bg-vf-surface-4"
             onClick={() => { deleteSelected(); setClipCtx(null); }}
           >
-            🗑 Delete
+            Delete (Delete)
+          </button>
+          {/* Added to match Canva context menu items with hints */}
+          <button
+            role="menuitem"
+            type="button"
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs text-vf-text-primary hover:bg-vf-surface-4"
+            onClick={() => { alert("Add transition (would open transition picker like Canva)"); setClipCtx(null); }}
+          >
+            Add transition
+          </button>
+          <button
+            role="menuitem"
+            type="button"
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs text-vf-text-primary hover:bg-vf-surface-4"
+            onClick={() => { alert("Comment added (stub - would open comment UI ⌥⌘N)"); setClipCtx(null); }}
+          >
+            Comment (⌥⌘N)
+          </button>
+          <button
+            role="menuitem"
+            type="button"
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs text-vf-text-primary hover:bg-vf-surface-4"
+            onClick={() => { alert("Lock background (stub ⌥⇧L)"); setClipCtx(null); }}
+          >
+            Lock background (⌥⇧L)
+          </button>
+          <button
+            role="menuitem"
+            type="button"
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs text-vf-text-primary hover:bg-vf-surface-4"
+            onClick={() => { alert("Info (stub)"); setClipCtx(null); }}
+          >
+            Info
           </button>
         </div>
       )}
@@ -528,6 +794,44 @@ export default function Timeline() {
           className="z-[9999] w-44 rounded-md border border-vf-border-subtle bg-vf-surface-3 p-1 shadow-vf-2"
           onMouseDown={(e) => e.stopPropagation()}
         >
+          <button
+            role="menuitem"
+            type="button"
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-vf-surface-4"
+            onClick={() => {
+              const t = tracks.find((tt) => tt.id === trackCtx.trackId) || captionTracks.find((tt) => tt.id === trackCtx.trackId);
+              if (t) {
+                const hidden = (t as any).hidden ?? false;
+                setTrackHidden && setTrackHidden(trackCtx.trackId, !hidden);
+              }
+              setTrackCtx(null);
+            }}
+          >
+            👁 Toggle hide
+          </button>
+          <button
+            role="menuitem"
+            type="button"
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-vf-surface-4"
+            onClick={() => {
+              moveTrack && moveTrack(trackCtx.trackId, "up");
+              setTrackCtx(null);
+            }}
+          >
+            ↑ Move up (earlier in z-order)
+          </button>
+          <button
+            role="menuitem"
+            type="button"
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-vf-surface-4"
+            onClick={() => {
+              moveTrack && moveTrack(trackCtx.trackId, "down");
+              setTrackCtx(null);
+            }}
+          >
+            ↓ Move down
+          </button>
+          <div className="my-1 border-t border-vf-border-subtle" />
           <button
             role="menuitem"
             type="button"
@@ -567,7 +871,7 @@ export default function Timeline() {
         <IconButton aria-label="Zoom in" size="sm" onClick={() => setZoom(pxPerSecond + 20)}>
           <span aria-hidden="true">+</span>
         </IconButton>
-        <span className="vf-tnum text-2xs text-vf-text-tertiary">{pxPerSecond} px/s</span>
+        <span className="vf-tnum text-2xs text-vf-text-tertiary">Zoom {Math.round(pxPerSecond)}%</span>
       </div>
     </div>
   );
@@ -580,6 +884,7 @@ function TrackHeader({
   onSelect,
   onMute,
   onSolo,
+  onHidden,
   onContextMenu,
 }: {
   track: Track;
@@ -587,9 +892,12 @@ function TrackHeader({
   onSelect: () => void;
   onMute: (v: boolean) => void;
   onSolo: (v: boolean) => void;
+  onHidden?: (v: boolean) => void;
   onContextMenu: (x: number, y: number) => void;
 }) {
   const isAudio = track.type === "audio" || track.type === "voiceover";
+  const hidden = (track as any).hidden ?? false;
+  const locked = (track as any).locked ?? false;
   return (
     <div
       onClick={onSelect}
@@ -601,56 +909,62 @@ function TrackHeader({
       className={cx(
         "flex flex-col justify-center gap-1 border-b border-vf-border-subtle px-2",
         selected ? "bg-vf-surface-3" : "bg-vf-surface-2",
+        hidden && "opacity-50",
       )}
       style={{ height: track.height }}
     >
       <div className="flex items-center gap-1">
-        <span aria-hidden="true" className="text-xs" title={track.type}>
+        <span aria-hidden="true" className="text-vf-text-tertiary" title={track.type}>
           {TYPE_ICON[track.type]}
         </span>
         <span className="truncate text-xs font-medium text-vf-text-primary">{track.name}</span>
+        {locked && (
+          <span title="Locked" className="inline-flex">
+            <Lock className="h-3 w-3 text-vf-text-tertiary" aria-hidden="true" />
+          </span>
+        )}
         <span
           aria-hidden="true"
           className="ml-auto h-3 w-3 shrink-0 rounded-sm"
           style={{ backgroundColor: track.colour }}
         />
       </div>
-      {isAudio && (
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
-            role="switch"
-            aria-checked={track.muted}
-            aria-label={`Mute ${track.name}`}
-            onClick={(e) => {
-              e.stopPropagation();
-              onMute(!track.muted);
-            }}
-            className={cx(
-              "h-5 rounded-sm px-1.5 text-2xs",
-              track.muted ? "bg-vf-surface-4 text-vf-accent-text" : "text-vf-text-tertiary hover:bg-vf-surface-3",
-            )}
+      <div className="flex items-center gap-1">
+        {isAudio && (
+          <>
+            <Tooltip label={track.muted ? "Unmute" : "Mute"}>
+              <IconButton
+                aria-label={`Mute ${track.name}`}
+                size="lg"
+                active={track.muted}
+                onClick={(e) => { e.stopPropagation(); onMute(!track.muted); }}
+              >
+                {track.muted ? <VolumeX className="h-4 w-4" aria-hidden="true" /> : <Volume2 className="h-4 w-4" aria-hidden="true" />}
+              </IconButton>
+            </Tooltip>
+            <Tooltip label={track.solo ? "Unsolo" : "Solo"}>
+              <IconButton
+                aria-label={`Solo ${track.name}`}
+                size="lg"
+                active={track.solo}
+                onClick={(e) => { e.stopPropagation(); onSolo(!track.solo); }}
+              >
+                <Star className="h-4 w-4" aria-hidden="true" />
+              </IconButton>
+            </Tooltip>
+          </>
+        )}
+        <Tooltip label={hidden ? "Show track" : "Hide track"}>
+          <IconButton
+            aria-label={`${hidden ? "Show" : "Hide"} ${track.name}`}
+            size="lg"
+            active={hidden}
+            onClick={(e) => { e.stopPropagation(); onHidden && onHidden(!hidden); }}
           >
-            M
-          </button>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={track.solo}
-            aria-label={`Solo ${track.name}`}
-            onClick={(e) => {
-              e.stopPropagation();
-              onSolo(!track.solo);
-            }}
-            className={cx(
-              "h-5 rounded-sm px-1.5 text-2xs",
-              track.solo ? "bg-vf-surface-4 text-vf-accent-text" : "text-vf-text-tertiary hover:bg-vf-surface-3",
-            )}
-          >
-            S
-          </button>
-        </div>
-      )}
+            {hidden ? <Eye className="h-4 w-4" aria-hidden="true" /> : <EyeOff className="h-4 w-4" aria-hidden="true" />}
+          </IconButton>
+        </Tooltip>
+      </div>
     </div>
   );
 }
@@ -758,19 +1072,27 @@ function TrackBody({
                 </span>
               </button>
             ))
-          : track.clips.map((clip) => (
-              <MediaClipBlock
-                key={clip.id}
-                clip={clip}
-                track={track}
-                pxPerMs={pxPerMs}
-                selected={selectionId === clip.id}
-                previewOverride={clip.id === dragClipId ? dragPreview : null}
-                slotInfo={placeholderSlots.get(clip.id) ?? null}
-                onClipDown={onClipDown}
-                onContextMenu={(x, y) => onClipContextMenu(clip.id, track.id, x, y)}
-              />
-            ))}
+          : (
+            <>
+              {track.clips.length === 0 ? (
+                <div className="absolute inset-0 flex items-center px-3 text-[10px] text-vf-text-tertiary/70 pointer-events-none">
+                  Drag a clip here, or double-click media to add it
+                </div>
+              ) : track.clips.map((clip) => (
+                <MediaClipBlock
+                  key={clip.id}
+                  clip={clip}
+                  track={track}
+                  pxPerMs={pxPerMs}
+                  selected={selectionId === clip.id}
+                  previewOverride={clip.id === dragClipId ? dragPreview : null}
+                  slotInfo={placeholderSlots.get(clip.id) ?? null}
+                  onClipDown={onClipDown}
+                  onContextMenu={(x, y) => onClipContextMenu(clip.id, track.id, x, y)}
+                />
+              ))}
+            </>
+          )}
     </div>
   );
 }
@@ -814,9 +1136,19 @@ const MediaClipBlock = memo(function MediaClipBlock({
       data-testid={`clip-${clip.id}`}
       data-placeholder={isPlaceholder ? "true" : undefined}
       onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); onContextMenu(e.clientX, e.clientY); }}
-      onPointerDown={(e) => onClipDown(e, clip, track, "move")}
+      onPointerDown={(e) => {
+        e.stopPropagation();
+        onClipDown(e, clip, track, "move");
+      }}
+      onClick={() => {
+        // If this is a template placeholder, request the left media rail to open so user can fill it.
+        const ph = (useEditorStore.getState().placeholderLabels || {})[clip.id];
+        if (ph || slotInfo) {
+          (useEditorStore.getState() as any).requestOpenMediaForPlaceholder?.(clip.id);
+        }
+      }}
       className={cx(
-        "group absolute top-1 flex h-[calc(100%-8px)] cursor-move flex-col overflow-hidden rounded-xs border",
+        "group absolute top-1 z-[5] flex h-[calc(100%-8px)] cursor-move flex-col overflow-hidden rounded-xs border",
         isPlaceholder
           ? "border-dashed border-vf-border-default bg-vf-surface-2"
           : isAudio
@@ -827,11 +1159,13 @@ const MediaClipBlock = memo(function MediaClipBlock({
       style={{ left, width }}
     >
       {isPlaceholder ? (
-        // Slot placeholder: icon + "Drop your photo or video here" + "N of M" badge.
+        // Slot placeholder: clearer "this is a template slot waiting for your media".
+        // Once a real (non-placeholder) asset is assigned via replace, isSlotFilled flips
+        // and this cell becomes a normal MediaClipBlock with thumb + info.
         <div className="flex h-full w-full items-center gap-2 px-2">
           <span aria-hidden="true" className="text-vf-icon-muted">▦</span>
           <span className="truncate text-xs font-medium text-vf-text-tertiary">
-            Drop your photo or video here
+            {slotInfo!.label} • drop photo/video
           </span>
           <span className="ml-auto shrink-0 text-2xs text-vf-text-disabled">
             {slotInfo!.index} of {slotInfo!.total}
@@ -856,24 +1190,49 @@ const MediaClipBlock = memo(function MediaClipBlock({
         )}
       </div>
 
-      {/* Body: real waveform peaks for audio, plain fill for video */}
-      <div className="relative min-h-0 flex-1">
+      {/* Body: thumbnail for video clips (full visual), waveform for audio */}
+      <div
+        className="relative min-h-0 flex-1 overflow-hidden"
+        style={
+          !isAudio && !isPlaceholder
+            ? {
+                backgroundImage: getAssetMeta(clip.sourceAssetId)?.thumbnailUrl
+                  ? `url(${getAssetMeta(clip.sourceAssetId)!.thumbnailUrl})`
+                  : undefined,
+                backgroundSize: "cover",
+                backgroundPosition: "center",
+                backgroundRepeat: "no-repeat",
+              }
+            : undefined
+        }
+      >
         {isAudio ? (
           <ClipWaveform assetId={clip.sourceAssetId} trimInMs={clip.trimIn} trimOutMs={clip.trimOut} />
+        ) : !isPlaceholder ? (
+          // subtle overlay so label above is readable, and "video" indication
+          <div className="absolute inset-0 bg-black/10" />
         ) : null}
       </div>
         </>
       )}
 
-      {/* Trim handles (8px grab zones; appear on hover/selection) */}
+      {/* Trim handles (wider 3px grab zones for reliable hit even when playhead line crosses the edge;
+          high z so they win pointer events over the playhead line (the root cause of "edge drag moves playhead").
+          The red playhead line remains visible across the clip body for position feedback. */}
       <div
-        onPointerDown={(e) => onClipDown(e, clip, track, "trim-start")}
-        className="absolute left-0 top-0 h-full w-2 cursor-ew-resize bg-vf-border-strong/0 group-hover:bg-vf-border-strong/40"
+        onPointerDown={(e) => {
+          e.stopPropagation();
+          onClipDown(e, clip, track, "trim-start");
+        }}
+        className="absolute left-0 top-0 z-[60] h-full w-3 cursor-ew-resize bg-vf-border-strong/0 group-hover:bg-vf-border-strong/50"
         aria-hidden="true"
       />
       <div
-        onPointerDown={(e) => onClipDown(e, clip, track, "trim-end")}
-        className="absolute right-0 top-0 h-full w-2 cursor-ew-resize bg-vf-border-strong/0 group-hover:bg-vf-border-strong/40"
+        onPointerDown={(e) => {
+          e.stopPropagation();
+          onClipDown(e, clip, track, "trim-end");
+        }}
+        className="absolute right-0 top-0 z-[60] h-full w-3 cursor-ew-resize bg-vf-border-strong/0 group-hover:bg-vf-border-strong/50"
         aria-hidden="true"
       />
     </div>
@@ -994,9 +1353,11 @@ function AddTrackMenu({
 
   return (
     <div className="relative">
-      <IconButton aria-label="Add track" size="sm" onClick={() => setOpen((v) => !v)}>
-        <span aria-hidden="true">+</span>
-      </IconButton>
+      <Tooltip label="Add track">
+        <IconButton aria-label="Add track" size="lg" onClick={() => setOpen((v) => !v)}>
+          <Plus className="h-5 w-5" aria-hidden="true" />
+        </IconButton>
+      </Tooltip>
       {open && (
         <div
           ref={menuRef}
@@ -1025,7 +1386,7 @@ function AddTrackMenu({
                     : "text-vf-text-primary hover:bg-vf-surface-4",
                 )}
               >
-                <span aria-hidden="true">{TYPE_ICON[kind]}</span>
+                <span aria-hidden="true" className="text-vf-text-tertiary">{TYPE_ICON[kind]}</span>
                 {label}
               </button>
             );

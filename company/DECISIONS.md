@@ -86,7 +86,9 @@ Gate types: 💰 money · 🧭 scope · 🚀 release/publish · ⚠️ irreversi
 - **Atlas recommends:** **A** — lead on the parity guarantee, drop the below-market friction; defer
   Pro to post-MVP. Watermark is already a filter toggle, so near-zero eng cost.
 - **Cost/risk if wrong:** launch messaging + first-impression of the free tier.
-- **Decision:** ⏳ pending
+- **Decision:** ✅ **A — watermark-free 1080p** (Anuj, 2026-06-14). Lead on the parity guarantee, drop
+  below-market friction. Pro deferred to post-MVP. Watermark becomes an off-by-default filter toggle on
+  the free tier. Owner: Reel (graph toggle) + Pixel (export modal copy). Executed by Atlas.
 
 ### 2026-06-04 🧭 New-Project default aspect ratio
 - **Raised by:** Vera
@@ -97,7 +99,8 @@ Gate types: 💰 money · 🧭 scope · 🚀 release/publish · ⚠️ irreversi
 - **Atlas recommends:** **A** — the parity wedge isn't format-specific; stay format-agnostic. One-line
   config either way.
 - **Cost/risk if wrong:** trivial to flip; mainly affects the demo story.
-- **Decision:** ⏳ pending
+- **Decision:** ✅ **A — equal-weight chooser, no default** (Anuj, 2026-06-14). Stay format-agnostic; the
+  parity wedge isn't format-specific. Owner: Pixel (NewProjectModal). Executed by Atlas.
 
 ### 2026-06-04 🧭/💰 MVP auth scope + external credentials
 - **Raised by:** Core
@@ -131,7 +134,11 @@ Gate types: 💰 money · 🧭 scope · 🚀 release/publish · ⚠️ irreversi
   infra $/setup. C) Keep perf as a non-blocking warning for now.
 - **Atlas recommends:** **A** for the CI merge gate ($0, catches regressions) + keep the absolute
   30fps target as a local/release check. Revisit B only if A proves too noisy.
-- **Decision:** ⏳ pending (needed before the Wave-3 CI gate-hardening)
+- **Decision:** ✅ **B — absolute ≥30fps on pinned hardware** (Anuj, 2026-06-14). CEO chose the reliable
+  absolute gate over the $0 relative-regression option. ⚠️ **Follow-up money/infra gate:** this requires a
+  **self-hosted/pinned-hardware CI runner** — a new (small) infra spend. **Anchor to scope the cheapest
+  viable option and report the actual $/mo BEFORE provisioning anything** (no spend without a sized, logged
+  💰 decision). Until the runner exists, the perf stage runs as a non-blocking warning.
 
 <!-- template:
 ### [DATE] [gate-emoji] <one-line title>
@@ -146,6 +153,35 @@ Gate types: 💰 money · 🧭 scope · 🚀 release/publish · ⚠️ irreversi
 ---
 
 ## ✅ Log — decided
+
+### 2026-06-10 🧭 Create→export reliability fix + full-roadmap pass (CEO test feedback)
+- **Context:** CEO ran a real creator flow (Travel Recap → edit text → export) and **could not export** —
+  `project failed §18 validation (3 issue(s))` + a `5 unfilled slots` warning. Rated 5.5/10; "fix the
+  create→export path" called **non-negotiable**.
+- **Atlas root-cause (reproduced deterministically):**
+  1. **The 3 §18 issues** = the Italic/Underline text controls wrote `style.fontStyle`/`textDecoration`,
+     keys absent from the strict `TextStyleSchema` → one `unrecognized_keys` issue per text overlay (3
+     overlays = 3 issues). Preview tolerated them; only export-time validation rejected. (Also a latent
+     italic preview≠export split: graph read `style.italic`, preview read `style.fontStyle`.)
+  2. **The 5 unfilled slots** = slot-fill (drop + click) was gated on `meta.proxyUrl||thumbnailUrl`, which
+     is `null` for a just-uploaded asset until the worker probes it → fill silently no-op'd, slot stayed a
+     placeholder, a duplicate clip was added.
+  3. **Opaque/unrecoverable error** = the export doc was sanitized *after* the local validate, so the
+     server was first to reject it (no preflight, no jump-to-item).
+- **Shipped (this session, verified — typecheck clean; golden/ffmpeg-graph 62, schema 47, templates 92, new lib regressions green):**
+  Italic now writes the schema `italic` field (preview unified on it); slot-fill no longer gated on proxy;
+  a client **export preflight** builds the exact worker snapshot, validates it, lists each blocker with a
+  jump-to-item, and disables Export until clean; legacy bad style keys are stripped so pre-fix projects can
+  still export. Single source of truth: `apps/web/src/lib/templates.ts › buildExportDocument`.
+- **CEO decisions (3):** **(scope)** full-roadmap pass — go beyond the export fix; **(empty slots)** BLOCK
+  with a preflight checklist (not silent prune to footage-less video) — shipped; **(underline)** implement
+  end-to-end.
+- **🧭 Underline — Atlas flag + re-scope:** FFmpeg `drawtext` has **no underline** and no shared glyph-width
+  helper exists, so honoring the *what-you-cut-is-what-you-get* invariant needs a new text-metrics subsystem
+  (Inter advance-width tables + golden parity) — a real task, not a button. Italic was already end-to-end so
+  it shipped now; the **corrupting underline writers were removed** (so the doc can never be poisoned) and
+  underline-render is queued as its own invariant-guarded milestone (owner Reel, guard Forge). Surfaced to CEO.
+- **Decided by:** Anuj (CEO) via session Q&A; executed by Atlas.
 
 ### 2026-06-04 🧭 Company operating model
 - **Decision:** Run Zentrix as a 14-persona org (Atlas + 13 specialists), bounded-autonomous

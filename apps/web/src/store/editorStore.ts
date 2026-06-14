@@ -66,6 +66,26 @@ export interface Selection {
   id: string | null;
 }
 
+/** After undo/redo or structural delete, ensure the current selection still exists in the project.
+ * If the element was removed, clear the selection so the inspector doesn't show stale "Selected a overlay". */
+function validateSelection(project: Project, sel: Selection): Selection {
+  if (!sel.id || !sel.kind) return { kind: null, id: null };
+  for (const track of project.tracks) {
+    const clips = (track as any).clips as Array<{ id: string }> | undefined;
+    if ((sel.kind === "clip" || sel.kind === "overlay") && clips?.some((c) => c.id === sel.id)) {
+      return sel;
+    }
+    if (sel.kind === "track" && track.id === sel.id) return sel;
+  }
+  for (const ct of project.captionTracks || []) {
+    if (sel.kind === "caption") {
+      if (ct.id === sel.id) return sel;
+      if ((ct as any).blocks?.some((b: any) => b.id === sel.id)) return sel;
+    }
+  }
+  return { kind: null, id: null };
+}
+
 export type AddTrackKind = "video" | "audio" | "voiceover" | "overlay";
 
 export interface EditorState {
@@ -83,6 +103,18 @@ export interface EditorState {
   _history: History;
   _canUndo: boolean;
   _canRedo: boolean;
+  /** Simple local clipboard for copy/paste of selected clip/overlay (in-memory, not persisted). */
+  clipboard: any | null;
+
+  /** Client-side placeholder labels for template apply (synthetic or manifest-driven hints).
+      Keyed by clipId → label shown in timeline dashed blocks and canvas grey rects. */
+  placeholderLabels: Record<string, string>;
+  /** When set, Editor should auto-switch the left rail to 'media' (used by placeholder clicks). */
+  pendingMediaOpenFor: string | null;
+  /** Timestamp (ms) until which we should suppress scary "Save failed" UI in StatusBar.
+      Set after applying a template (the project is "new" from template and may not be
+      persisted to the user's account yet). */
+  suppressSaveErrorUntil: number | null;
 }
 
 export interface EditorActions {
@@ -115,6 +147,8 @@ export interface EditorActions {
   splitAtPlayhead: () => void;
   deleteSelected: () => void;
   duplicateSelected: () => void;
+  copySelected: () => void;
+  paste: () => void;
   addTrack: (kind: AddTrackKind) => void;
   setTrackMute: (trackId: string, muted: boolean) => void;
   setTrackSolo: (trackId: string, solo: boolean) => void;
@@ -182,6 +216,14 @@ export interface EditorActions {
   moveClipLayer: (clipId: string, dir: "forward" | "backward") => void;
   /** Detach a clip from its A/V link partner so video + audio move/trim independently. */
   detachAudio: (clipId: string) => void;
+
+  // ── Templates panel (in-editor apply) client placeholder support ─────────────
+  /** Set a label for a placeholder clip (used by TemplatesPanel synthetic + real applies). */
+  setPlaceholderLabel: (clipId: string, label: string) => void;
+  /** Clear all placeholder labels (on new load / blank). */
+  clearPlaceholders: () => void;
+  /** Select a placeholder clip and signal the left rail to switch to Media for filling it. */
+  requestOpenMediaForPlaceholder: (clipId: string) => void;
 
   // ── M4: Per-clip gain + fades ─────────────────────────────────────────────────
   setClipGain: (clipId: string, trackId: string, gain: number) => void;
@@ -310,13 +352,13 @@ function findOverlay(
 function trackDefaults(kind: AddTrackKind): { name: string; colour: string; height: number } {
   switch (kind) {
     case "video":
-      return { name: "Video", colour: "#2BC4B0", height: 72 };
+      return { name: "Video", colour: "#2BC4B0", height: 80 }; // taller for easier trim handles
     case "audio":
-      return { name: "Audio", colour: "#7C9CFF", height: 56 };
+      return { name: "Audio", colour: "#7C9CFF", height: 64 };
     case "voiceover":
-      return { name: "Voice Over", colour: "#FF6B6B", height: 56 };
+      return { name: "Voice Over", colour: "#FF6B6B", height: 64 };
     case "overlay":
-      return { name: "Overlays", colour: "#FF9EC4", height: 56 };
+      return { name: "Overlays", colour: "#FF9EC4", height: 64 };
   }
 }
 
@@ -330,6 +372,7 @@ function makeTrack(kind: AddTrackKind, indexLabel: number): Track {
     muted: false,
     solo: false,
     locked: false,
+    hidden: false,
   };
   switch (kind) {
     case "video":
@@ -390,11 +433,28 @@ export const useEditorStore = create<EditorStore>()(
       _history: createHistory(HISTORY_LIMIT),
       _canUndo: false,
       _canRedo: false,
+      clipboard: null,
+      placeholderLabels: {},
+      pendingMediaOpenFor: null,  // one-shot: Editor sub consumes it to switch left rail to Media for placeholders
+      suppressSaveErrorUntil: null,
 
       // ── Project lifecycle ──
       loadProject: (p) =>
         set((s) => {
-          s.project = p;
+          // Normalize hidden on tracks so any legacy doc (saved before the field
+          // was required) becomes valid for prune/export and internal checks.
+          const normalized = {
+            ...p,
+            tracks: p.tracks.map((t) => ({
+              ...t,
+              hidden: typeof (t as any).hidden === "boolean" ? (t as any).hidden : false,
+            })),
+            captionTracks: p.captionTracks.map((ct) => ({
+              ...ct,
+              hidden: typeof (ct as any).hidden === "boolean" ? (ct as any).hidden : false,
+            })),
+          } as typeof p;
+          s.project = normalized;
           s.selection = { kind: null, id: null };
           s.playheadMs = 0;
           s.isPlaying = false;
@@ -402,6 +462,12 @@ export const useEditorStore = create<EditorStore>()(
           s._history = createHistory(HISTORY_LIMIT);
           s._canUndo = false;
           s._canRedo = false;
+          s.placeholderLabels = {};
+          s.suppressSaveErrorUntil = null;
+          // Intentionally do NOT clear pendingMediaOpenFor here.
+          // Template apply does loadProject(...) then shortly after calls
+          // requestOpenMediaForPlaceholder for the first placeholder slot.
+          // The Editor subscription will consume + clear the flag.
         }),
 
       // ── Transport / navigation (NOT undoable) ──
@@ -430,6 +496,30 @@ export const useEditorStore = create<EditorStore>()(
       clearSelection: () =>
         set((s) => {
           s.selection = { kind: null, id: null };
+        }),
+
+      // Client placeholder labels (for TemplatesPanel apply flow + canvas/timeline rendering)
+      setPlaceholderLabel: (clipId, label) =>
+        set((s) => {
+          s.placeholderLabels = { ...s.placeholderLabels, [clipId]: label };
+        }),
+      clearPlaceholders: () =>
+        set((s) => {
+          s.placeholderLabels = {};
+          // pendingMediaOpenFor is a separate one-shot UI signal; leave it alone here.
+        }),
+
+      /** Called when a placeholder clip is clicked in timeline/canvas to request the media rail opens. */
+      requestOpenMediaForPlaceholder: (clipId: string) =>
+        set((s) => {
+          s.pendingMediaOpenFor = clipId;
+          s.selection = { kind: "clip", id: clipId };
+        }),
+
+      /** Suppress "Save failed — retrying" UI in StatusBar for N ms (used after fresh template apply). */
+      suppressSaveErrorsFor: (ms: number) =>
+        set((s) => {
+          s.suppressSaveErrorUntil = Date.now() + Math.max(1000, ms);
         }),
 
       // ── Clip operations (undoable) ──
@@ -692,9 +782,24 @@ export const useEditorStore = create<EditorStore>()(
         commit((project) => {
           switch (kind) {
             case "clip": {
+              // F14: cascade delete linked clip (video + audio together)
+              let linkedId: string | null = null;
               for (const track of project.tracks) {
                 if (!isMediaTrack(track)) continue;
-                track.clips = track.clips.filter((c) => c.id !== id);
+                const hit = track.clips.find((c) => c.id === id);
+                if (hit && (hit as any).linkedClipId) linkedId = (hit as any).linkedClipId;
+                // Also check if this clip is the linked target of the one being deleted
+                track.clips = track.clips.filter((c) => {
+                  if (c.id === id) return false;
+                  if ((c as any).linkedClipId === id) { linkedId = c.id; return false; }
+                  return true;
+                });
+              }
+              if (linkedId) {
+                for (const track of project.tracks) {
+                  if (!isMediaTrack(track)) continue;
+                  track.clips = track.clips.filter((c) => c.id !== linkedId);
+                }
               }
               // Drop any transition that referenced the removed clip.
               project.transitions = project.transitions.filter(
@@ -775,15 +880,106 @@ export const useEditorStore = create<EditorStore>()(
         }
       },
 
+      copySelected: () => {
+        const { selection, project } = get();
+        if (!selection.id || !selection.kind) return;
+        let data: any = null;
+        if (selection.kind === "clip") {
+          const found = findClip(project, selection.id);
+          if (found) data = { kind: "clip", clip: { ...found.clip }, trackType: found.track.type };
+        } else if (selection.kind === "overlay") {
+          const found = findOverlay(project, selection.id);
+          if (found) data = { kind: "overlay", overlay: { ...found.clip } };
+        }
+        if (data) {
+          set((s) => { (s as any).clipboard = data; });
+        }
+      },
+
+      paste: () => {
+        const { clipboard, playheadMs } = get();
+        if (!clipboard) return;
+        const newId = uuidv4();
+        commit((p) => {
+          if (clipboard.kind === "clip" && clipboard.clip) {
+            const src = clipboard.clip as Clip;
+            // Find a suitable target track (prefer same type or first video)
+            let targetTrack = p.tracks.find((t: any) => t.type === clipboard.trackType) as any;
+            if (!targetTrack) targetTrack = p.tracks.find((t: any) => t.type === "video") as any;
+            if (!targetTrack) return;
+            const span = src.endOnTimeline - src.startOnTimeline;
+            const others = targetTrack.clips || [];
+            const start = firstFreeSlotStart(others, span, Math.max(0, playheadMs));
+            const copy: Clip = {
+              ...src,
+              id: newId,
+              startOnTimeline: start,
+              endOnTimeline: start + span,
+              linkedClipId: null,
+            };
+            if (!targetTrack.clips) targetTrack.clips = [];
+            targetTrack.clips.push(copy);
+            // sort by time? existing code doesn't always, but ok
+            targetTrack.clips.sort((a: any, b: any) => a.startOnTimeline - b.startOnTimeline);
+          } else if (clipboard.kind === "overlay" && clipboard.overlay) {
+            let ovTrack = p.tracks.find((t: any) => t.type === "overlay") as any;
+            if (!ovTrack) {
+              // create one on demand
+              ovTrack = makeTrack("overlay", 1);
+              p.tracks.push(ovTrack);
+            }
+            const src = clipboard.overlay as OverlayClip;
+            const span = src.endOnTimeline - src.startOnTimeline;
+            const others = ovTrack.clips || [];
+            const start = firstFreeSlotStart(others, span, Math.max(0, playheadMs));
+            const copy: OverlayClip = {
+              ...src,
+              id: newId,
+              startOnTimeline: start,
+              endOnTimeline: start + span,
+            } as any;
+            if (!ovTrack.clips) ovTrack.clips = [];
+            ovTrack.clips.push(copy);
+            ovTrack.clips.sort((a: any, b: any) => a.startOnTimeline - b.startOnTimeline);
+          }
+        });
+        // select the pasted item
+        set((s) => {
+          s.selection = { kind: clipboard.kind === "clip" ? "clip" : "overlay", id: newId };
+        });
+      },
+
       // ── Track operations (undoable) ──
       addTrack: (kind) => {
+        let newTrackId: string | null = null;
         commit((project) => {
           const sameKind = project.tracks.filter((t) => t.type === kind).length;
           // Insert: video tracks at the BOTTOM (index 0 = bottom z-order per §18),
           // every other kind appended above.
           const track = makeTrack(kind, sameKind + 1);
+          newTrackId = track.id;
           if (kind === "video") project.tracks.unshift(track);
           else project.tracks.push(track);
+        });
+        // Select the new track so the Inspector immediately gives guidance
+        // ("New Video track — drag clips from the media panel onto the timeline").
+        if (newTrackId) {
+          // Use the action so any listeners / inspector update.
+          // We call the internal setter to avoid re-entrancy with commit.
+          set((s) => {
+            s.selection = { kind: "track", id: newTrackId };
+          });
+        }
+      },
+      moveTrack: (trackId: string, direction: "up" | "down") => {
+        commit((project) => {
+          const idx = project.tracks.findIndex((t) => t.id === trackId);
+          if (idx < 0) return;
+          const newIdx = direction === "up" ? idx - 1 : idx + 1;
+          if (newIdx < 0 || newIdx >= project.tracks.length) return;
+          const moved = project.tracks.splice(idx, 1)[0];
+          if (!moved) return;
+          project.tracks.splice(newIdx, 0, moved);
         });
       },
 
@@ -796,12 +992,20 @@ export const useEditorStore = create<EditorStore>()(
         });
       },
 
-      setTrackSolo: (trackId, solo) => {
+      setTrackSolo: (trackId: string, solo: boolean) => {
         commit((project) => {
           const track = project.tracks.find((t) => t.id === trackId);
           if (track) track.solo = solo;
           const ct = project.captionTracks.find((t) => t.id === trackId);
           if (ct) ct.solo = solo;
+        });
+      },
+      setTrackHidden: (trackId: string, hidden: boolean) => {
+        commit((project) => {
+          const track = project.tracks.find((t) => t.id === trackId);
+          if (track) (track as any).hidden = hidden;
+          const ct = project.captionTracks.find((t) => t.id === trackId);
+          if (ct) (ct as any).hidden = hidden;
         });
       },
 
@@ -829,8 +1033,10 @@ export const useEditorStore = create<EditorStore>()(
         const state = get();
         if (!historyCanUndo(state._history)) return;
         const { state: project, history } = historyUndo(state.project, state._history);
+        const nextSel = validateSelection(project, state.selection);
         set((s) => {
           s.project = project;
+          s.selection = nextSel;
           s._history = history;
           s._canUndo = historyCanUndo(history);
           s._canRedo = historyCanRedo(history);
@@ -840,8 +1046,10 @@ export const useEditorStore = create<EditorStore>()(
         const state = get();
         if (!historyCanRedo(state._history)) return;
         const { state: project, history } = historyRedo(state.project, state._history);
+        const nextSel = validateSelection(project, state.selection);
         set((s) => {
           s.project = project;
+          s.selection = nextSel;
           s._history = history;
           s._canUndo = historyCanUndo(history);
           s._canRedo = historyCanRedo(history);

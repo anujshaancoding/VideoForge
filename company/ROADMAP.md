@@ -48,6 +48,19 @@ Last updated: 2026-06-05
 
 Priority order by dependency + MVP-done gate. All items are `✅` in `docs/MVP_Scope.md`.
 
+> **✅ Shipped 2026-06-10 — Create→export reliability (CEO P0, "non-negotiable").** Fixed the create→export
+> break the CEO hit in testing: text Italic/Underline buttons no longer poison the doc with non-§18 style
+> keys (the `§18 (3 issues)` failure); slot-fill works for just-uploaded media (the `5 unfilled slots` bug);
+> a client **export preflight** validates the real worker snapshot and blocks with a jump-to-item checklist
+> instead of an opaque server error; legacy bad-key docs auto-heal on export. Verified green (golden + all
+> package suites). Details in `DECISIONS.md` 2026-06-10. Owner Reel / guard Forge.
+>
+> **🧭 Full-roadmap pass (CEO-greenlit 2026-06-10)** sequences onto already-approved gates: **audio/elements
+> libraries** = the approved CC0 stock+music library (#1); **AI script→reel + auto-captions** = Script
+> Studio v1 (#2); **magical templates / auto-fill** = template thumbnails + visual slot-fill (#4). New tracked
+> milestone: **underline-in-export** (needs a shared Inter text-metrics subsystem for `drawtext` parity —
+> invariant-guarded; owner Reel). **Social presets** (Reels/Shorts/TikTok/IG safe-zones) added as a Next item.
+
 | # | Item | Owner | Acceptance Criterion |
 |---|---|---|---|
 | 1 | **CI: golden-frame fidelity gate green** — commit CC0 fixture media (Git LFS), write real SSIM/PSNR comparison in `golden.test.ts`, wire as a PR merge gate | **Reel** + Sentinel | `pnpm test:golden` passes on every PR; fixture matrix covers trim, split, multi-track stack, linked-audio move, speed change — SSIM ≥ 0.985 / PSNR ≥ 38 dB; gate blocks merge on failure |

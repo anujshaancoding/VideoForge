@@ -1,5 +1,6 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react';
 import { Button } from '../ui/index.js';
+import { AlertTriangle } from 'lucide-react';
 
 interface Props { children: ReactNode; fallbackLabel?: string; }
 interface State { error: Error | null; }
@@ -19,7 +20,7 @@ export class EditorErrorBoundary extends Component<Props, State> {
     if (this.state.error) {
       return (
         <div className="flex h-full flex-col items-center justify-center gap-4 bg-vf-bg-app text-center p-8">
-          <span aria-hidden="true" className="text-4xl">⚠</span>
+          <AlertTriangle className="h-10 w-10 text-vf-danger-fg" aria-hidden="true" />
           <h2 className="text-lg font-bold text-vf-text-primary">
             {this.props.fallbackLabel ?? 'Something went wrong'}
           </h2>

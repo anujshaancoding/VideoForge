@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 import { getBrowserSupport } from "../lib/browser.js";
 import { Button } from "../components/ui/index.js";
+import { Play, ExternalLink } from "lucide-react";
 
 // Browser gate (§4.4) — shown instead of the editor on non-Chromium / non-WebCodecs
 // / mobile clients. Helpful and honest (not an error): explains WHY (WebCodecs /
@@ -33,7 +34,7 @@ export default function BrowserGate() {
           className="mx-auto mb-6 inline-flex h-12 w-12 items-center justify-center rounded-md bg-vf-accent-subtle text-2xl text-vf-accent-text"
           aria-hidden="true"
         >
-          ▶
+          <Play className="h-6 w-6" aria-hidden="true" />
         </div>
         <div className="mb-2 text-sm font-semibold uppercase tracking-wide text-vf-accent-text">
           VideoForge
@@ -55,7 +56,7 @@ export default function BrowserGate() {
             rel="noopener noreferrer"
             className="inline-flex h-9 items-center gap-1 rounded-md border border-vf-border-default bg-vf-surface-2 px-3 text-sm text-vf-text-primary hover:bg-vf-surface-3"
           >
-            Get Chrome <span aria-hidden="true">↗</span>
+            Get Chrome <ExternalLink className="h-3.5 w-3.5 inline" aria-hidden="true" />
           </a>
           <a
             href="https://www.microsoft.com/edge"
@@ -63,7 +64,7 @@ export default function BrowserGate() {
             rel="noopener noreferrer"
             className="inline-flex h-9 items-center gap-1 rounded-md border border-vf-border-default bg-vf-surface-2 px-3 text-sm text-vf-text-primary hover:bg-vf-surface-3"
           >
-            Get Edge <span aria-hidden="true">↗</span>
+            Get Edge <ExternalLink className="h-3.5 w-3.5 inline" aria-hidden="true" />
           </a>
         </div>
 

@@ -375,7 +375,9 @@ export async function apiGetExport(exportId: string): Promise<ExportRecord> {
 }
 
 export async function apiGetDownloadUrl(exportId: string): Promise<{ downloadUrl: string }> {
-  return request<{ downloadUrl: string }>(`/exports/${exportId}/download`);
+  // Must be POST to match the server route (which mints a fresh 1h signed URL on each call).
+  // Using GET would 404 (no GET handler registered for the download action).
+  return request<{ downloadUrl: string }>(`/exports/${exportId}/download`, { method: 'POST' });
 }
 
 /** Poll until export is COMPLETE or FAILED. Calls onProgress with 0–100. */

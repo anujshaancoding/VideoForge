@@ -18,6 +18,7 @@ async function gotoDashboard(page: import("@playwright/test").Page) {
 
 async function openEditor(page: import("@playwright/test").Page) {
   await gotoDashboard(page);
+  await page.getByTestId("project-actions-btn").first().waitFor({ state: "visible", timeout: 15000 });
   await page.getByTestId("project-actions-btn").first().click();
   await page.getByRole("menuitem", { name: "Open" }).click();
   await page.waitForURL(/\/editor\//);

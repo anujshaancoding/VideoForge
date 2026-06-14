@@ -146,6 +146,7 @@ const trackBaseShape = {
   muted: z.boolean(),
   solo: z.boolean(),
   locked: z.boolean(),
+  hidden: z.boolean(),
 };
 
 // ── Overlay clips ──────────────────────────────────────────────────────────────

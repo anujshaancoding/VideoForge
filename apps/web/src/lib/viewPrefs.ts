@@ -13,7 +13,7 @@
 
 const LS_KEY = 'videoforge.viewPrefs.v1';
 
-export type LeftPanelTab = 'media' | 'text' | 'captions';
+export type LeftPanelTab = 'media' | 'text' | 'captions' | 'stock' | 'elements' | 'ai';
 
 export interface ViewPrefs {
   /** Timeline scale in pixels-per-second (mirrors editorStore.zoom). */
@@ -36,8 +36,9 @@ export function readViewPrefs(): Partial<ViewPrefs> {
     if (typeof p.timelineZoom === 'number' && Number.isFinite(p.timelineZoom)) {
       out.timelineZoom = p.timelineZoom;
     }
-    if (p.leftPanelTab === 'media' || p.leftPanelTab === 'text' || p.leftPanelTab === 'captions') {
-      out.leftPanelTab = p.leftPanelTab;
+    const validTabs: LeftPanelTab[] = ['media', 'text', 'captions', 'stock', 'elements', 'ai'];
+    if (validTabs.includes(p.leftPanelTab as LeftPanelTab)) {
+      out.leftPanelTab = p.leftPanelTab as LeftPanelTab;
     }
     if (typeof p.leftPanelCollapsed === 'boolean') {
       out.leftPanelCollapsed = p.leftPanelCollapsed;

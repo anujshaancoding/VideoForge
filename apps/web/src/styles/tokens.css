@@ -3,18 +3,22 @@
    Faithfully transcribed from the Design Instructions §2.
    ============================================================ */
 :root {
-  /* 2.1 Neutral surfaces & elevation */
-  --vf-bg-app: #0B0E14;
-  --vf-surface-canvas-surround: #1A1A2E;
-  --vf-surface-1: #12161F;
-  --vf-surface-2: #1A1F2B;
-  --vf-surface-3: #232A38;
-  --vf-surface-4: #2C3445;
-  --vf-surface-sunken: #080A0F;
-  --vf-border-subtle: #262D3B;
-  --vf-border-default: #3A4357;
-  --vf-border-strong: #525E78;
-  --vf-overlay-scrim: rgba(7, 9, 15, 0.64);
+  /* 2.1 Neutral surfaces & elevation — premium cinematic depth */
+  --vf-bg-app: #0A0C14;
+  --vf-surface-canvas-surround: #15182A;
+  --vf-surface-1: #0F121C;
+  --vf-surface-2: #161B29;
+  --vf-surface-3: #1F2538;
+  --vf-surface-4: #282F45;
+  --vf-surface-5: #323A52; /* new elevated surface for cards/modals */
+  --vf-surface-sunken: #07090F;
+  --vf-surface-elevated: #20263A; /* for floating panels */
+  --vf-border-subtle: #22283A;
+  --vf-border-default: #333C52;
+  --vf-border-strong: #4A556C;
+  --vf-border-focus: #5B8CFF;
+  --vf-overlay-scrim: rgba(5, 7, 12, 0.72);
+  --vf-glass: rgba(22, 27, 41, 0.85); /* subtle glass for HUD */
 
   /* 2.2 Text & icon */
   --vf-text-primary: #F4F6FB;
@@ -115,22 +119,24 @@
   --vf-space-10: 40px;
   --vf-space-12: 48px;
 
-  /* Layout constants */
-  --vf-topbar-h: 56px;
-  --vf-transport-h: 48px;
-  --vf-status-h: 28px;
-  --vf-track-header-w: 180px;
-  --vf-left-panel-w: 280px;
-  --vf-right-panel-w: 300px;
-  --vf-timeline-h: 260px;
+  /* Layout constants — canvas dominant */
+  --vf-topbar-h: 52px;
+  --vf-transport-h: 44px;
+  --vf-status-h: 26px;
+  --vf-track-header-w: 160px;
+  --vf-left-rail-w: 80px; /* icon rail - wider for substantial icons per UX feedback */
+  --vf-left-content-w: 280px; /* secondary panel */
+  --vf-right-panel-w: 280px;
+  --vf-timeline-h: 240px; /* slightly more compact for canvas emphasis */
 
-  /* 2.8 Radii */
+  /* 2.8 Radii — refined premium */
   --vf-radius-none: 0;
-  --vf-radius-xs: 2px;
-  --vf-radius-sm: 4px;
-  --vf-radius-md: 8px;
-  --vf-radius-lg: 12px;
-  --vf-radius-xl: 16px;
+  --vf-radius-xs: 3px;
+  --vf-radius-sm: 6px;
+  --vf-radius-md: 10px;
+  --vf-radius-lg: 14px;
+  --vf-radius-xl: 20px;
+  --vf-radius-2xl: 24px;
   --vf-radius-pill: 999px;
   --vf-radius-full: 50%;
 
@@ -141,14 +147,16 @@
   --vf-stroke-thick: 3px;
   --vf-focus-ring-color: #6FB6FF;
 
-  /* 2.10 Shadows */
+  /* 2.10 Shadows — deeper, cinematic */
   --vf-shadow-0: none;
-  --vf-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.32);
-  --vf-shadow-2: 0 4px 12px rgba(0, 0, 0, 0.40);
-  --vf-shadow-3: 0 12px 32px rgba(0, 0, 0, 0.50);
-  --vf-shadow-4: 0 20px 48px rgba(0, 0, 0, 0.58);
-  --vf-shadow-focus-accent: 0 0 0 3px rgba(255, 122, 26, 0.35);
-  --vf-shadow-inset-well: inset 0 1px 2px rgba(0, 0, 0, 0.45);
+  --vf-shadow-1: 0 1px 3px rgba(0, 0, 0, 0.35);
+  --vf-shadow-2: 0 4px 16px rgba(0, 0, 0, 0.45);
+  --vf-shadow-3: 0 10px 30px rgba(0, 0, 0, 0.55);
+  --vf-shadow-4: 0 18px 50px rgba(0, 0, 0, 0.65);
+  --vf-shadow-focus-accent: 0 0 0 4px rgba(255, 122, 26, 0.25);
+  --vf-shadow-inset-well: inset 0 2px 4px rgba(0, 0, 0, 0.5);
+  --vf-shadow-card: 0 8px 24px rgba(0, 0, 0, 0.4), 0 2px 4px rgba(0, 0, 0, 0.3);
+  --vf-shadow-modal: 0 20px 60px rgba(0, 0, 0, 0.6);
 
   /* 2.11 Motion */
   --vf-motion-instant: 80ms;

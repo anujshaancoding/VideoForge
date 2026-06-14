@@ -11,6 +11,8 @@ build/
 .env
 .env.local
 .env.*.local
+# Now holds the real super-account credential, so it must NOT be committed.
+.env.example
 
 # OS
 .DS_Store

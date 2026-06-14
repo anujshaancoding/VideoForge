@@ -46,7 +46,7 @@ export const Slider = forwardRef<HTMLInputElement, SliderProps>(function Slider(
         step={step}
         onChange={(e) => onChange?.(Number(e.target.value))}
         className={cx(
-          "h-1.5 w-full cursor-pointer appearance-none rounded-pill bg-vf-surface-sunken",
+          "h-3 w-full cursor-pointer appearance-none rounded-pill bg-vf-surface-sunken",
           "shadow-vf-inset-well accent-vf-accent",
         )}
         {...rest}

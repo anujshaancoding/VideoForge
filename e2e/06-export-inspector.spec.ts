@@ -10,6 +10,7 @@ async function openEditor(page: import("@playwright/test").Page) {
   await page.evaluate(() => localStorage.removeItem("videoforge.projects.v1"));
   await page.reload();
   await page.waitForLoadState("networkidle");
+  await page.getByTestId("project-actions-btn").first().waitFor({ state: "visible", timeout: 15000 });
   await page.getByTestId("project-actions-btn").first().click();
   await page.getByRole("menuitem", { name: "Open" }).click();
   await page.waitForURL(/\/editor\//);

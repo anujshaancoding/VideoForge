@@ -72,6 +72,9 @@ export function cloneTemplateToProject(template: Template, opts: CloneOptions): 
   for (const track of doc.tracks) {
     const newTrackId = remap(track.id);
     track.id = newTrackId;
+    // Normalize hidden to boolean (default false) so older template docs / clones
+    // always satisfy the strict ProjectSchema (TrackBase.hidden: boolean).
+    (track as any).hidden = typeof (track as any).hidden === "boolean" ? (track as any).hidden : false;
     if (track.type === "video" || track.type === "audio" || track.type === "voiceover") {
       for (const clip of track.clips) {
         clip.id = remap(clip.id);
@@ -90,6 +93,7 @@ export function cloneTemplateToProject(template: Template, opts: CloneOptions): 
   for (const ct of doc.captionTracks) {
     const newCtId = remap(ct.id);
     ct.id = newCtId;
+    (ct as any).hidden = typeof (ct as any).hidden === "boolean" ? (ct as any).hidden : false;
     for (const b of ct.blocks) b.id = remap(b.id);
   }
   for (const m of doc.markers) m.id = remap(m.id);
@@ -268,6 +272,16 @@ export function unfilledMediaSlotCount(project: Project, manifest: TemplateManif
 export function pruneUnfilledSlots(project: Project, manifest: TemplateManifest): Project {
   const pruned = structuredClone(project) as Project;
 
+  // Normalize hidden: boolean on every track (default false). This makes prune
+  // robust for legacy documents (pre-hidden schema, old saves, direct clones)
+  // so validateProject never sees undefined for a required boolean field.
+  for (const track of pruned.tracks) {
+    (track as any).hidden = typeof (track as any).hidden === "boolean" ? (track as any).hidden : false;
+  }
+  for (const ct of pruned.captionTracks) {
+    (ct as any).hidden = typeof (ct as any).hidden === "boolean" ? (ct as any).hidden : false;
+  }
+
   const clipIdsToDrop = new Set<string>();
   const overlayIdsToDrop = new Set<string>();
   const captionToDrop = new Map<string, Set<string>>(); // captionTrackId → blockIds
@@ -326,4 +340,78 @@ export function isPlaceholderClip(project: Project, manifest: TemplateManifest, 
   return manifest.slots.some(
     (s) => s.target.type === "clip" && s.target.clipId === clipId && !isSlotFilled(project, s),
   );
+}
+
+// ── Export snapshot builder (single source of truth for preflight + POST) ─────────
+
+/**
+ * The §18 `TextStyle` keys the strict validator accepts (mirror of `TextStyleSchema`
+ * in `packages/project-schema`). Anything else on a text overlay's `style` — e.g. the
+ * legacy `fontStyle` / `textDecoration` keys written by older builds of the Italic /
+ * Underline controls — makes the WHOLE document fail §18 validation at export with
+ * `Unrecognized key(s) in object`. We strip unknown keys so a project saved before
+ * that bug was fixed can still export. New writes only ever use the fields below.
+ */
+const ALLOWED_TEXT_STYLE_KEYS = new Set<string>([
+  "fontFamily", "fontSize", "fontWeight", "italic", "color", "gradient",
+  "align", "lineHeight", "letterSpacing", "outline", "shadow", "backgroundColor",
+]);
+
+/** Remove non-§18 keys from every text overlay's `style` (in place). */
+function stripUnknownTextStyleKeys(doc: Project): void {
+  for (const track of doc.tracks) {
+    if (track.type !== "overlay") continue;
+    for (const ov of track.clips) {
+      if (ov.kind !== "text") continue;
+      const style = ov.style as unknown as Record<string, unknown>;
+      if (!style || typeof style !== "object") continue;
+      for (const key of Object.keys(style)) {
+        if (!ALLOWED_TEXT_STYLE_KEYS.has(key)) delete style[key];
+      }
+    }
+  }
+}
+
+/**
+ * Build the EXACT §18 snapshot the render worker will receive — the one place that
+ * decides "what we validate is what we send", so the export preflight and the export
+ * POST can never disagree. Pure: takes a clone, never mutates the live project.
+ *
+ *   1. strip legacy unknown style keys (so old corrupted docs validate),
+ *   2. prune unfilled OPTIONAL template slots (placeholder media the user didn't fill),
+ *   3. drop clips whose `sourceAssetId` has no real backing asset for this user
+ *      (template demo/placeholder assets the worker can't fetch), and
+ *   4. drop transitions left dangling by 2–3.
+ *
+ * @param realAssetIds ids of assets the user actually owns (asset registry keys).
+ */
+export function buildExportDocument(
+  project: Project,
+  manifest: TemplateManifest | null,
+  realAssetIds: Set<string>,
+): Project {
+  // Strip BEFORE prune: pruneUnfilledSlots re-validates internally and would throw on
+  // a doc that still carries legacy bad style keys.
+  const stripped = structuredClone(project) as Project;
+  stripUnknownTextStyleKeys(stripped);
+
+  let document: Project = manifest ? pruneUnfilledSlots(stripped, manifest) : stripped;
+
+  const sanitizedTracks = document.tracks.map((t) => {
+    if (t.type === "video" || t.type === "audio" || t.type === "voiceover") {
+      return { ...t, clips: t.clips.filter((c) => !c.sourceAssetId || realAssetIds.has(c.sourceAssetId)) };
+    }
+    return t;
+  });
+  const keptClipIds = new Set<string>();
+  for (const t of sanitizedTracks) {
+    if (t.type === "video" || t.type === "audio" || t.type === "voiceover") {
+      for (const c of t.clips) keptClipIds.add(c.id);
+    }
+  }
+  const sanitizedTransitions = document.transitions.filter(
+    (tr) => keptClipIds.has(tr.fromClipId) && keptClipIds.has(tr.toClipId),
+  );
+
+  return { ...document, tracks: sanitizedTracks, transitions: sanitizedTransitions };
 }

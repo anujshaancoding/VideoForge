@@ -9,6 +9,7 @@ import {
   type TemplateSlot,
 } from "@videoforge/templates";
 import {
+  buildExportDocument,
   cloneTemplateToProject,
   isSlotFilled,
   pruneUnfilledSlots,
@@ -224,5 +225,89 @@ describe("unfilledMediaSlotCount", () => {
   it("counts every unfilled media slot of a fresh clone", () => {
     const { document, manifest } = cloneTemplateToProject(simplePromo, { ownerId: OWNER, workspaceId: WS });
     expect(unfilledMediaSlotCount(document, manifest)).toBe(3); // all 3 media slots unfilled
+  });
+});
+
+describe("buildExportDocument (export preflight snapshot)", () => {
+  // Helper: corrupt every text overlay's style exactly like the OLD Italic/Underline
+  // buttons did (writing fontStyle/textDecoration — keys absent from the strict §18
+  // TextStyleSchema). This is the reported "project failed §18 validation (3 issues)".
+  const corruptTextStyles = (doc: Project): number => {
+    let n = 0;
+    for (const t of doc.tracks) {
+      if (t.type !== "overlay") continue;
+      for (const ov of t.clips) {
+        if (ov.kind === "text") {
+          (ov.style as Record<string, unknown>)["fontStyle"] = "italic";
+          (ov.style as Record<string, unknown>)["textDecoration"] = "underline";
+          n++;
+        }
+      }
+    }
+    return n;
+  };
+
+  it("reproduces then heals the §18 'unrecognized key(s)' failure (1 issue per text overlay)", () => {
+    const { document } = cloneTemplateToProject(photoMemories, { ownerId: OWNER, workspaceId: WS });
+    const corrupted = corruptTextStyles(document);
+    expect(corrupted).toBeGreaterThan(0);
+
+    // The corrupted document fails §18 with exactly one unrecognized_keys issue per overlay.
+    const before = validateProject(document);
+    expect(before.ok).toBe(false);
+    expect(before.errors!.length).toBe(corrupted);
+    expect(before.errors!.every((e) => e.code === "unrecognized_keys")).toBe(true);
+
+    // buildExportDocument strips the unknown keys → the snapshot the worker receives validates.
+    const snapshot = buildExportDocument(document, null, new Set());
+    expect(validateProject(snapshot).ok).toBe(true);
+    for (const t of snapshot.tracks) {
+      if (t.type !== "overlay") continue;
+      for (const ov of t.clips) {
+        if (ov.kind === "text") {
+          expect("fontStyle" in ov.style).toBe(false);
+          expect("textDecoration" in ov.style).toBe(false);
+        }
+      }
+    }
+  });
+
+  it("preserves the schema-valid `italic` field the fixed buttons now write", () => {
+    const { document } = cloneTemplateToProject(photoMemories, { ownerId: OWNER, workspaceId: WS });
+    for (const t of document.tracks) {
+      if (t.type !== "overlay") continue;
+      for (const ov of t.clips) if (ov.kind === "text") ov.style.italic = true;
+    }
+    expect(validateProject(document).ok).toBe(true); // italic IS a §18 field → already valid
+
+    const snapshot = buildExportDocument(document, null, new Set());
+    expect(validateProject(snapshot).ok).toBe(true);
+    const text = snapshot.tracks
+      .flatMap((t) => (t.type === "overlay" ? t.clips : []))
+      .find((c) => c.kind === "text");
+    expect(text && "style" in text && (text as { style: { italic?: boolean } }).style.italic).toBe(true);
+  });
+
+  it("produces a §18-valid snapshot for a fully-filled template (real assets survive sanitize)", () => {
+    const { document, manifest } = cloneTemplateToProject(simplePromo, { ownerId: OWNER, workspaceId: WS });
+    // Fill every media slot with a real (owned) asset id and register it as real.
+    const REAL_ASSET = "fee1f00d-dead-4bee-8fed-0a1b2c3d4e5f"; // valid lowercase uuid v4
+    const realAssetIds = new Set<string>([REAL_ASSET]);
+    for (const slot of manifest.slots) {
+      if (slot.kind === "text" || slot.target.type !== "clip") continue;
+      for (const t of document.tracks) {
+        if (t.type !== "video" && t.type !== "audio" && t.type !== "voiceover") continue;
+        const clip = t.clips.find((c) => c.id === (slot.target.type === "clip" ? slot.target.clipId : ""));
+        if (clip) clip.sourceAssetId = REAL_ASSET;
+      }
+    }
+    expect(unfilledMediaSlotCount(document, manifest)).toBe(0);
+    const snapshot = buildExportDocument(document, manifest, realAssetIds);
+    expect(validateProject(snapshot).ok).toBe(true);
+    // The filled clips survive (not pruned, not sanitized away).
+    const survivingClips = snapshot.tracks.flatMap((t) =>
+      t.type === "video" || t.type === "audio" || t.type === "voiceover" ? t.clips : [],
+    );
+    expect(survivingClips.length).toBeGreaterThan(0);
   });
 });

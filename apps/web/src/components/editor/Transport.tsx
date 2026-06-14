@@ -6,6 +6,7 @@ import {
 import { msToTimecode } from "@videoforge/project-schema";
 import { IconButton, Slider, Tooltip } from "../ui/index.js";
 import { audioEngine, previewEngine } from "../../engine/index.js";
+import { SkipBack, SkipForward, Play, Pause, ChevronLeft, ChevronRight, Volume2 } from "lucide-react";
 
 // Transport — 48px playback band below the canvas (§5.5). role="toolbar".
 //
@@ -61,11 +62,11 @@ export default function Transport() {
     <div
       role="toolbar"
       aria-label="Playback controls"
-      className="flex h-transport items-center gap-3 bg-vf-surface-2 px-4"
+      className="flex h-transport items-center gap-1 bg-vf-surface-2 px-2 text-xs sm:gap-2 sm:px-3 sm:text-sm md:gap-3 md:px-4"
     >
       {/* Current timecode (left). */}
       <span
-        className="vf-tnum w-24 shrink-0 text-sm text-vf-text-primary"
+        className="vf-tnum w-16 shrink-0 text-xs sm:w-20 sm:text-sm md:w-24 text-vf-text-primary"
         aria-label="Current time"
       >
         {msToTimecode(playheadMs, fps)}
@@ -73,14 +74,14 @@ export default function Transport() {
 
       {/* Transport core group, centered. */}
       <div className="flex flex-1 items-center justify-center gap-1">
-        <Tooltip label="Skip to start (Home)">
-          <IconButton aria-label="Skip to start" onClick={skipStart}>
-            <span aria-hidden="true">⏮</span>
+        <Tooltip label="Skip to start">
+          <IconButton aria-label="Skip to start" size="lg" onClick={skipStart}>
+            <SkipBack className="h-5 w-5" aria-hidden="true" />
           </IconButton>
         </Tooltip>
-        <Tooltip label="Step back 1 frame (←)">
-          <IconButton aria-label="Step back one frame" onClick={stepBack}>
-            <span aria-hidden="true">◀|</span>
+        <Tooltip label="Step back">
+          <IconButton aria-label="Step back one frame" size="md" onClick={stepBack}>
+            <ChevronLeft className="h-4 w-4" aria-hidden="true" />
           </IconButton>
         </Tooltip>
         <Tooltip label={isPlaying ? "Pause (Space)" : "Play (Space)"}>
@@ -93,17 +94,17 @@ export default function Transport() {
               isPlaying ? "bg-vf-accent text-vf-text-inverse hover:bg-vf-accent-hover" : ""
             }
           >
-            <span aria-hidden="true">{isPlaying ? "⏸" : "▶"}</span>
+            {isPlaying ? <Pause className="h-5 w-5" aria-hidden="true" /> : <Play className="h-5 w-5" aria-hidden="true" />}
           </IconButton>
         </Tooltip>
-        <Tooltip label="Step forward 1 frame (→)">
-          <IconButton aria-label="Step forward one frame" onClick={stepFwd}>
-            <span aria-hidden="true">|▶</span>
+        <Tooltip label="Step forward">
+          <IconButton aria-label="Step forward one frame" size="md" onClick={stepFwd}>
+            <ChevronRight className="h-4 w-4" aria-hidden="true" />
           </IconButton>
         </Tooltip>
-        <Tooltip label="Skip to end (End)">
-          <IconButton aria-label="Skip to end" onClick={skipEnd}>
-            <span aria-hidden="true">⏭</span>
+        <Tooltip label="Skip to end">
+          <IconButton aria-label="Skip to end" size="lg" onClick={skipEnd}>
+            <SkipForward className="h-5 w-5" aria-hidden="true" />
           </IconButton>
         </Tooltip>
       </div>
@@ -120,9 +121,7 @@ export default function Transport() {
       <div className="flex shrink-0 items-center gap-2 pl-3">
         <Tooltip label="Monitor volume (preview only — does not affect export)">
           <div className="flex items-center gap-1">
-            <span aria-hidden="true" className="text-vf-icon-muted">
-              🔊
-            </span>
+            <Volume2 className="h-4 w-4 text-vf-text-tertiary" aria-hidden="true" />
             <Slider
               aria-label="Master monitor volume"
               value={monitorVol}

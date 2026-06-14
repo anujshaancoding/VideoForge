@@ -154,9 +154,12 @@ function lastSentDocument(): Project {
 }
 
 describe("ExportModal — sends pruned render-snapshot as `document`", () => {
-  it("(a) a PARTIALLY-filled template sends a document with unfilled placeholder clips/overlays removed", async () => {
+  it("(a) a PARTIALLY-filled template BLOCKS export with a preflight checklist (no silent prune)", async () => {
+    // CEO decision (full-roadmap pass): a template with empty media slots must NOT
+    // silently prune to a footage-less video — it BLOCKS with a preflight checklist
+    // until the slots are filled. (Replaces the old "send a pruned snapshot" contract.)
     const { document, manifest } = cloneTemplateToProject(simplePromo, { ownerId: OWNER, workspaceId: WS });
-    // Fill exactly ONE media slot (scene-1) by swapping its placeholder asset.
+    // Fill exactly ONE media slot (scene-1); the rest stay unfilled.
     const slot = manifest.slots.find((s) => s.id === "scene-1")!;
     const filledClipId = slot.target.type === "clip" ? slot.target.clipId : "";
     for (const t of document.tracks) {
@@ -166,16 +169,13 @@ describe("ExportModal — sends pruned render-snapshot as `document`", () => {
     }
     loadTemplateProject(document, manifest);
 
-    const originalClipCount = allClipIds(document).length;
     render(<ExportModal open onClose={() => {}} />);
-    await runExportToDone();
 
-    const sent = lastSentDocument();
-    // The two unfilled media placeholders + the four unfilled text overlays were pruned…
-    expect(allClipIds(sent).length).toBeLessThan(originalClipCount);
-    expect(allOverlayTexts(sent)).toHaveLength(0);
-    // …but the filled clip survives.
-    expect(allClipIds(sent)).toContain(filledClipId);
+    // The blocking preflight checklist is shown and Export is disabled.
+    expect(screen.getByTestId("export-preflight")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /export video/i })).toBeDisabled();
+    // No export POST is attempted while a slot is empty.
+    expect(apiCreateExport).not.toHaveBeenCalled();
   });
 
   it("(b) a FULLY-filled template sends the complete document (nothing pruned)", async () => {

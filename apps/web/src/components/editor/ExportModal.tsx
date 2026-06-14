@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Info } from 'lucide-react';
 import { selectProjectDurationMs, useEditorStore } from '../../store/editorStore.js';
+import { useAssetStore } from '../../store/assetStore.js';
 import { Button, cx, Modal } from '../ui/index.js';
 import { apiCreateExport, apiPollExportComplete, apiGetDownloadUrl, ApiError } from '../../lib/api.js';
 import { wsClient } from '../../lib/wsClient.js';
 import { clearFirstSession, isFirstSession } from '../../lib/firstSession.js';
 import { trackEvent } from '../../lib/analytics.js';
 import { resolveManifest } from '../../store/templateStore.js';
-import { pruneUnfilledSlots, unfilledMediaSlotCount } from '../../lib/templates.js';
+import { buildExportDocument, unfilledMediaSlots } from '../../lib/templates.js';
+import { validateProject, type Project } from '@videoforge/project-schema';
 
 // ExportModal (§8.2) — MP4/H.264, ≤1080p Free-tier cap, social presets.
 // Real flow: POST /api/v1/exports → poll until COMPLETE → mint download URL.
@@ -29,6 +32,35 @@ function estimateSizeMb(w: number, h: number, fps: number, durationMs: number): 
 function estimateTimeLabel(durationMs: number): string {
   const renderSec = Math.max(1, Math.round(durationMs / 4000));
   return renderSec < 90 ? `~ ${renderSec} sec` : `~ ${Math.round(renderSec / 60)} min`;
+}
+
+/**
+ * Resolve a Zod issue path (e.g. ["tracks",2,"clips",0,"style"]) to the editor
+ * element it points at, so a preflight blocker can deep-link the user straight to the
+ * broken item ("click a validation error to jump to the timeline item"). Best-effort:
+ * returns null when the path doesn't address a selectable clip/overlay/caption.
+ */
+function resolveSelectionFromPath(
+  project: Project,
+  path: ReadonlyArray<string | number>,
+): { kind: 'clip' | 'overlay' | 'caption'; id: string } | null {
+  try {
+    if (path[0] === 'tracks' && typeof path[1] === 'number') {
+      const track = project.tracks[path[1]] as { type: string; clips?: Array<{ id: string }> } | undefined;
+      if (track && path[2] === 'clips' && typeof path[3] === 'number') {
+        const el = track.clips?.[path[3]];
+        if (el) return { kind: track.type === 'overlay' ? 'overlay' : 'clip', id: el.id };
+      }
+    }
+    if (path[0] === 'captionTracks' && typeof path[1] === 'number') {
+      const ct = project.captionTracks[path[1]] as { blocks?: Array<{ id: string }> } | undefined;
+      if (ct && path[2] === 'blocks' && typeof path[3] === 'number') {
+        const b = ct.blocks?.[path[3]];
+        if (b) return { kind: 'caption', id: b.id };
+      }
+    }
+  } catch { /* best-effort deep-link only */ }
+  return null;
 }
 
 interface ExportModalProps {
@@ -102,14 +134,55 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
   const sizeMb = estimateSizeMb(dims.w, dims.h, fps, durationMs);
   const overCap = Math.min(project.canvas.width, project.canvas.height) > 1080;
 
-  // Template empty-slot warning (Templates_Spec AC-7 / Templates_Architecture §5):
-  // non-blocking — count unfilled media slots so the user knows they'll be dropped
-  // from the export. Export stays ENABLED. `pruneUnfilledSlots` (lib/templates) removes
-  // these placeholders from a clone of the doc before render so the graph stays valid.
-  const unfilledSlots = useMemo(() => {
+  // Editor actions used to deep-link a preflight blocker to the broken item.
+  const select = useEditorStore((s) => s.select);
+  const requestOpenMediaForPlaceholder = useEditorStore((s) => s.requestOpenMediaForPlaceholder);
+  const assets = useAssetStore((s) => s.assets);
+
+  // ── Export preflight (the create→export gate) ──────────────────────────────────
+  // Build the EXACT snapshot the worker will receive (lib/templates.buildExportDocument)
+  // and validate it HERE, on the client, so a broken document is caught with a friendly,
+  // itemized checklist BEFORE the POST — instead of the server rejecting it with a raw
+  // "project failed §18 validation" the user can't act on. Two kinds of blocker:
+  //   • unfilled template media slots (the user must fill or the moment is missing), and
+  //   • §18 validation issues on the final document (each deep-links to its element).
+  // Export is BLOCKED (button disabled) while any blocker exists.
+  const preflight = useMemo(() => {
     const manifest = resolveManifest(project);
-    return manifest ? unfilledMediaSlotCount(project, manifest) : 0;
-  }, [project]);
+    const unfilled = manifest ? unfilledMediaSlots(project, manifest) : [];
+    const realAssetIds = new Set(Object.keys(assets));
+    let issues: Array<{ key: string; label: string; target: { kind: 'clip' | 'overlay' | 'caption'; id: string } | null }> = [];
+    let buildError: string | null = null;
+    try {
+      const doc = buildExportDocument(project, manifest, realAssetIds);
+      const v = validateProject(doc);
+      if (!v.ok) {
+        issues = (v.errors ?? []).map((e, i) => ({
+          key: `${e.path.join('.')}-${i}`,
+          label: `${e.path.join('.') || 'project'} — ${e.message}`,
+          target: resolveSelectionFromPath(project, e.path),
+        }));
+      }
+    } catch (e) {
+      buildError = e instanceof Error ? e.message : String(e);
+    }
+    return { unfilled, issues, buildError, blocked: unfilled.length > 0 || issues.length > 0 || buildError != null };
+  }, [project, assets]);
+
+  const jumpToSlot = useCallback((slotTarget: { type: string; clipId?: string }) => {
+    if (slotTarget.type === 'clip' && slotTarget.clipId) {
+      select('clip', slotTarget.clipId);
+      requestOpenMediaForPlaceholder(slotTarget.clipId);
+    }
+    handleClose();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [select, requestOpenMediaForPlaceholder]);
+
+  const jumpToIssue = useCallback((target: { kind: 'clip' | 'overlay' | 'caption'; id: string } | null) => {
+    if (target) select(target.kind, target.id);
+    handleClose();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [select]);
 
   const handleExport = useCallback(async () => {
     setPhase('exporting');
@@ -123,12 +196,26 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
 
     try {
       // WYCIWYG render-snapshot: send the EXACT document the preview used so the worker
-      // renders precisely what's on screen. For a template-derived project we prune the
-      // unfilled optional slots first (lib/templates) so the graph references only real,
-      // resolvable media — a partially-filled template still produces a valid video. For a
-      // normal project there's no manifest, so we send the current document unchanged.
-      const manifest = resolveManifest(project);
-      const document = manifest ? pruneUnfilledSlots(project, manifest) : project;
+      // renders precisely what's on screen. buildExportDocument (lib/templates) is the
+      // SINGLE source of truth shared with the preflight memo above — strip legacy style
+      // keys, prune unfilled optional slots, drop clips with no real backing asset, and
+      // drop the transitions those steps leave dangling — so what we validate is exactly
+      // what we send.
+      const realAssetIds = new Set(Object.keys(useAssetStore.getState().assets));
+      const document = buildExportDocument(project, resolveManifest(project), realAssetIds);
+
+      // Defense in depth: never POST a document that fails §18 validation. The Export
+      // button is already disabled while preflight.blocked, but a race (asset registry
+      // changing between render and click) could still slip through — surface the
+      // friendly itemized error instead of relying on the server's raw rejection.
+      const finalCheck = validateProject(document);
+      if (!finalCheck.ok) {
+        const errs = finalCheck.errors ?? [];
+        const list = errs.slice(0, 4).map((e) => `${e.path.join('.') || 'project'} ${e.message}`).join(' • ');
+        setErrorMsg(`project failed §18 validation (${errs.length} issue(s))${list ? ': ' + list : ''}`);
+        setPhase('error');
+        return;
+      }
 
       const effectiveCaptions = hasCaptions ? captions : 'none';
       const rec = await apiCreateExport({
@@ -209,7 +296,27 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
           setPhase('ratelimited');
           return;
         }
-        setErrorMsg(err instanceof Error ? err.message : String(err));
+        let msg = err instanceof Error ? err.message : String(err);
+        // When the server rejects a snapshot (or stored doc) with §18 issues, the body
+        // contains {error: 'ValidationError', issues: [...]}. Surface the actual list
+        // so the user sees the 4 problems and can fix (instead of opaque "4 issue(s)").
+        if (err instanceof ApiError && /400|ValidationError/i.test(msg)) {
+          const m = msg.match(/\{[\s\S]*\}$/);
+          if (m) {
+            try {
+              const body = JSON.parse(m[0]);
+              if (body && (body.error === 'ValidationError' || /validation/i.test(body.error || '')) && Array.isArray(body.issues)) {
+                const n = body.issues.length;
+                const list = body.issues.slice(0, 4).map((e: any) => {
+                  const p = e.path ? e.path + ' ' : '';
+                  return p + (e.message || e.code || JSON.stringify(e));
+                }).join(' • ');
+                msg = `project failed §18 validation (${n} issue(s))${list ? ': ' + list : ''}`;
+              }
+            } catch { /* fall back to raw */ }
+          }
+        }
+        setErrorMsg(msg);
         setPhase('error');
       }
     }
@@ -257,7 +364,15 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
         phase === 'config' ? (
           <>
             <Button variant="ghost" onClick={handleClose}>Cancel</Button>
-            <Button variant="primary" onClick={handleExport}>Export</Button>
+            <Button
+              variant="primary"
+              onClick={handleExport}
+              disabled={preflight.blocked}
+              title={preflight.blocked ? 'Resolve the items in the preflight checklist to export' : undefined}
+              aria-label="Export video"
+            >
+              Export
+            </Button>
           </>
         ) : phase === 'exporting' ? (
           <Button variant="ghost" onClick={handleClose}>Cancel</Button>
@@ -343,7 +458,24 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
         <div className="flex flex-col items-center gap-3 py-8 text-center">
           <span aria-hidden="true" className="text-4xl">❌</span>
           <p className="text-base font-medium text-vf-danger-fg">Export failed</p>
-          <p className="max-w-sm break-all text-sm text-vf-text-secondary">{errorMsg}</p>
+          <div className="max-w-sm text-left text-sm text-vf-text-secondary">
+            {errorMsg && errorMsg.includes('issue(s)') ? (
+              <>
+                <p className="mb-2 break-all">{errorMsg.split(':')[0]}</p>
+                {errorMsg.includes(':') && (
+                  <ul className="list-disc pl-5 text-xs text-vf-text-tertiary space-y-1">
+                    {errorMsg
+                      .split(':')[1]
+                      ?.split('•')
+                      .map((issue, i) => <li key={i}>{issue.trim()}</li>)}
+                  </ul>
+                )}
+              </>
+            ) : (
+              <p className="break-all">{errorMsg}</p>
+            )}
+          </div>
+          <p className="text-2xs text-vf-text-tertiary">Check the timeline/inspector for unfilled slots, missing media, or invalid trims/transitions, then try again.</p>
         </div>
       )}
 
@@ -368,7 +500,7 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
               data-testid="watermark-disclosure"
               className="mb-4 flex items-start gap-2 rounded-md border border-vf-info-fg/40 bg-vf-info-bg p-3 text-2xs text-vf-text-secondary"
             >
-              <span aria-hidden="true" className="text-vf-info-fg">ⓘ</span>
+              <Info className="h-3.5 w-3.5 text-vf-info-fg flex-shrink-0 mt-0.5" aria-hidden="true" />
               <span>
                 Heads up: free-plan exports include a small VideoForge watermark in the
                 bottom-right corner. Everything else is exactly as you arranged it.
@@ -376,18 +508,51 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
             </div>
           )}
 
-          {/* Empty-slot warning (AC-7): non-blocking; Export stays enabled. */}
-          {unfilledSlots > 0 && (
+          {/* Export preflight checklist — the create→export gate. When anything here
+              is unresolved, Export is DISABLED (above) and each row deep-links to the
+              broken item so the user can fix it in one click, instead of hitting an
+              opaque server-side "§18 validation failed" with no path to recovery. */}
+          {preflight.blocked && (
             <div
-              data-testid="empty-slot-warning"
-              className="mb-4 flex items-start gap-2 rounded-md border border-vf-warning-fg/40 bg-vf-surface-2 p-3 text-2xs text-vf-text-secondary"
+              data-testid="export-preflight"
+              role="alert"
+              className="mb-4 rounded-md border border-vf-warning-fg/50 bg-vf-surface-2 p-3"
             >
-              <span aria-hidden="true" className="text-vf-warning-fg">⚠</span>
-              <span>
-                You have {unfilledSlots} unfilled {unfilledSlots === 1 ? 'slot' : 'slots'}. They'll be
-                left out of the export so your video renders cleanly. You can still export now, or go
-                back and add media.
-              </span>
+              <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-vf-text-primary">
+                <span aria-hidden="true" className="text-vf-warning-fg">⚠</span>
+                Fix {preflight.unfilled.length + preflight.issues.length || 1} before exporting
+              </div>
+              <ul className="space-y-1">
+                {preflight.unfilled.map((slot) => (
+                  <li key={slot.id} className="flex items-center justify-between gap-2 text-2xs text-vf-text-secondary">
+                    <span>Empty media slot: <span className="text-vf-text-primary">{slot.label}</span></span>
+                    <button
+                      type="button"
+                      onClick={() => jumpToSlot(slot.target as { type: string; clipId?: string })}
+                      className="shrink-0 rounded border border-vf-border-default px-2 py-0.5 text-vf-text-primary hover:bg-vf-surface-3"
+                    >
+                      Add media
+                    </button>
+                  </li>
+                ))}
+                {preflight.issues.map((issue) => (
+                  <li key={issue.key} className="flex items-center justify-between gap-2 text-2xs text-vf-text-secondary">
+                    <span className="break-all">{issue.label}</span>
+                    {issue.target && (
+                      <button
+                        type="button"
+                        onClick={() => jumpToIssue(issue.target)}
+                        className="shrink-0 rounded border border-vf-border-default px-2 py-0.5 text-vf-text-primary hover:bg-vf-surface-3"
+                      >
+                        Jump to item
+                      </button>
+                    )}
+                  </li>
+                ))}
+                {preflight.buildError && (
+                  <li className="text-2xs text-vf-danger-fg break-all">{preflight.buildError}</li>
+                )}
+              </ul>
             </div>
           )}
 
@@ -476,10 +641,12 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
                 </select>
               </label>
 
-              <div className="flex items-start gap-2 rounded-md border border-vf-border-subtle bg-vf-surface-2 p-3 text-2xs text-vf-text-secondary">
-                <span aria-hidden="true" className="text-vf-info-fg">ⓘ</span>
-                <span>A small VideoForge watermark is added to exports on the free plan (bottom-right).</span>
-              </div>
+              {!firstSession && (
+                <div className="flex items-start gap-2 rounded-md border border-vf-border-subtle bg-vf-surface-2 p-3 text-2xs text-vf-text-secondary">
+                  <Info className="h-3.5 w-3.5 text-vf-info-fg flex-shrink-0 mt-0.5" aria-hidden="true" />
+                  <span>A small VideoForge watermark is added to exports on the free plan (bottom-right).</span>
+                </div>
+              )}
 
               {overCap && (
                 <p className="text-2xs text-vf-text-tertiary">Canvas exceeds 1080p — export will be scaled down.</p>
