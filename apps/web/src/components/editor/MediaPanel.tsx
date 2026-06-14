@@ -3,7 +3,7 @@ import { useEditorStore } from '../../store/editorStore.js';
 import { useAssetStore, getAssetMeta, kindFromContentType } from '../../store/assetStore.js';
 import { Button, cx, Tooltip } from '../ui/index.js';
 import type { Track, CaptionBlock } from '@videoforge/project-schema';
-import { apiPresign, apiUploadToS3, apiConfirmUpload, apiGetAsset, apiPollAssetReady, fileHash, isAcceptedFormat, SIZE_LIMITS, formatBytes, type AssetRecord } from '../../lib/api.js';
+import { apiPresign, apiUploadToS3, apiMultipartUpload, MULTIPART_THRESHOLD, apiConfirmUpload, apiGetAsset, apiPollAssetReady, fileHash, isAcceptedFormat, SIZE_LIMITS, formatBytes, type AssetRecord } from '../../lib/api.js';
 import { wsClient } from '../../lib/wsClient.js';
 import { readViewPrefs, writeViewPrefs } from '../../lib/viewPrefs.js';
 import { parseCaptions } from '../../lib/captions.js';
@@ -304,8 +304,16 @@ export default function MediaPanel() {
         const assetId = presign.assetId!;
         updateAsset(tempId, { id: assetId });
 
-        // 3. PUT the file directly to S3, reporting real byte-upload progress
-        await apiUploadToS3(presign.uploadUrl!, file, (pct) => updateAsset(assetId, { progress: pct }));
+        // 3. Upload the bytes to S3, reporting real byte-upload progress.
+        //    Large files (≥ one 10 MB part) use resumable multipart with bounded
+        //    concurrency + per-part retry so a transient network blip re-uploads
+        //    only the failed parts (in-session resume) instead of restarting at 0.
+        //    Small files keep the simple single-shot PUT (no over-engineering).
+        if (file.size >= MULTIPART_THRESHOLD) {
+          await apiMultipartUpload(assetId, file, (pct) => updateAsset(assetId, { progress: pct }));
+        } else {
+          await apiUploadToS3(presign.uploadUrl!, file, (pct) => updateAsset(assetId, { progress: pct }));
+        }
 
         // 4. Confirm upload → triggers BullMQ proxy/thumbnail/waveform jobs.
         //    Server-side processing has no byte progress, so the card switches to

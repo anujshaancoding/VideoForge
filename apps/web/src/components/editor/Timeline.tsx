@@ -73,6 +73,8 @@ interface DragState {
   startX: number;
   originStartMs: number;
   originEndMs: number;
+  /** When true, this move drags the whole multi-selection together (group move). */
+  group: boolean;
 }
 
 /** Live (uncommitted) drag preview — drives the dragged block's position only. */
@@ -83,6 +85,12 @@ interface DragPreview {
   trackId: string;
   /** Snap-line x in px, or null. */
   snapX: number | null;
+  /**
+   * For a group move: the shared timeline delta (ms) applied to every selected clip.
+   * Non-anchor selected clips render at start+groupDeltaMs during the drag. Undefined
+   * for single-clip drags / trims.
+   */
+  groupDeltaMs?: number;
 }
 
 export default function Timeline() {
@@ -91,13 +99,18 @@ export default function Timeline() {
   const pxPerSecond = useEditorStore((s) => s.pxPerSecond);
   const playheadMs = useEditorStore((s) => s.playheadMs);
   const selection = useEditorStore((s) => s.selection);
+  const selectedClipIds = useEditorStore((s) => s.selectedClipIds);
   const fps = useEditorStore((s) => s.project.canvas.frameRate);
   const durationMs = useEditorStore(selectProjectDurationMs);
   const projectId = useEditorStore((s) => s.project.id);
 
   const setPlayhead = useEditorStore((s) => s.setPlayhead);
   const select = useEditorStore((s) => s.select);
+  const toggleClipSelection = useEditorStore((s) => s.toggleClipSelection);
+  const selectClips = useEditorStore((s) => s.selectClips);
+  const clearSelection = useEditorStore((s) => s.clearSelection);
   const moveClip = useEditorStore((s) => s.moveClip);
+  const groupMoveClips = useEditorStore((s) => s.groupMoveClips);
   const trimClip = useEditorStore((s) => s.trimClip);
   const addTrack = useEditorStore((s) => s.addTrack);
   const setZoom = useEditorStore((s) => s.setZoom);
@@ -117,6 +130,24 @@ export default function Timeline() {
   const bodyRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
   const [preview, setPreview] = useState<DragPreview | null>(null);
+  // Marquee rubber-band rectangle (in content-pixel coords, scroll-adjusted), or null.
+  const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+
+  // Fast membership lookup for the sky-blue multi-selection treatment.
+  const selectedSet = useMemo(() => new Set(selectedClipIds), [selectedClipIds]);
+  // Keep the latest selection in a ref so the pointer-move handler (created once per
+  // drag) always reads the current group rather than a stale closure.
+  const selectedClipIdsRef = useRef<string[]>(selectedClipIds);
+  selectedClipIdsRef.current = selectedClipIds;
+  // Resolve a media clip by id across the current track set (for group-delta clamping).
+  const clipById = (id: string): Clip | null => {
+    for (const t of tracks) {
+      if (t.type !== "video" && t.type !== "audio" && t.type !== "voiceover") continue;
+      const c = t.clips.find((x) => x.id === id);
+      if (c) return c;
+    }
+    return null;
+  };
 
   // Measure the visible width of the timeline body so we can stretch the
   // content area (ruler + tracks) to at least the full viewport width when
@@ -318,7 +349,23 @@ export default function Timeline() {
   ): void => {
     e.stopPropagation();
     if (track.locked) return;
-    select("clip", clip.id);
+
+    // Shift / Ctrl / Cmd click → toggle this clip in the multi-selection. This is a
+    // pure selection gesture; do NOT start a drag (so a modifier-click can't smear
+    // the timeline). Trim handles ignore the modifier (always single-clip trim).
+    if (mode === "move" && (e.shiftKey || e.ctrlKey || e.metaKey)) {
+      toggleClipSelection(clip.id);
+      return;
+    }
+
+    // Group move: if this clip is already part of a 2+ multi-selection, keep the
+    // group intact and drag them all. A plain click on an unselected (or solo) clip
+    // collapses to single-selection as before.
+    const currentSel = useEditorStore.getState().selectedClipIds;
+    const isGroup = mode === "move" && currentSel.length > 1 && currentSel.includes(clip.id);
+    if (!isGroup) {
+      select("clip", clip.id);
+    }
 
     // If this is a placeholder (manifest slot or client label from Templates apply),
     // immediately request the Media panel so the user can fill it. Do this on pointerDown
@@ -338,6 +385,7 @@ export default function Timeline() {
       startX: e.clientX,
       originStartMs: clip.startOnTimeline,
       originEndMs: clip.endOnTimeline,
+      group: isGroup,
     });
     setPreview({
       startMs: clip.startOnTimeline,
@@ -347,14 +395,92 @@ export default function Timeline() {
     });
   };
 
+  // Convert a client point to content-pixel coords (scroll-adjusted) inside the body.
+  const toContentXY = (clientX: number, clientY: number): { x: number; y: number } => {
+    const body = bodyRef.current;
+    if (!body) return { x: 0, y: 0 };
+    const rect = body.getBoundingClientRect();
+    return {
+      x: clientX - rect.left + body.scrollLeft,
+      y: clientY - rect.top + body.scrollTop,
+    };
+  };
+
+  // Begin a marquee when the pointer goes down on empty timeline-body space (clips and
+  // trim handles stopPropagation, so they never reach here). Clears the selection
+  // unless an additive modifier is held.
+  const onBodyPointerDown = (e: React.PointerEvent): void => {
+    if (e.button !== 0) return;
+    const additive = e.shiftKey || e.ctrlKey || e.metaKey;
+    if (!additive) clearSelection();
+    const { x, y } = toContentXY(e.clientX, e.clientY);
+    (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
+    setMarquee({ x0: x, y0: y, x1: x, y1: y });
+  };
+
+  // Top (content-px) of each lane, parallel to `allTracks`, for marquee hit-testing.
+  const laneTops = useMemo(() => {
+    const tops: Array<{ track: Track; top: number; bottom: number }> = [];
+    let acc = 0;
+    for (const t of allTracks) {
+      tops.push({ track: t, top: acc, bottom: acc + t.height });
+      acc += t.height;
+    }
+    return tops;
+  }, [allTracks]);
+
+  // All media clip ids whose blocks intersect the given content-px rectangle.
+  const clipsInRect = (r: { x0: number; y0: number; x1: number; y1: number }): string[] => {
+    const left = Math.min(r.x0, r.x1);
+    const right = Math.max(r.x0, r.x1);
+    const top = Math.min(r.y0, r.y1);
+    const bottom = Math.max(r.y0, r.y1);
+    const hits: string[] = [];
+    for (const lane of laneTops) {
+      const t = lane.track;
+      if (t.type !== "video" && t.type !== "audio" && t.type !== "voiceover") continue;
+      if (lane.bottom < top || lane.top > bottom) continue; // lane outside Y span
+      for (const c of t.clips) {
+        const cl = c.startOnTimeline * pxPerMs;
+        const cr = c.endOnTimeline * pxPerMs;
+        if (cr >= left && cl <= right) hits.push(c.id);
+      }
+    }
+    return hits;
+  };
+
   const onBodyPointerMove = (e: React.PointerEvent): void => {
+    if (marquee) {
+      const { x, y } = toContentXY(e.clientX, e.clientY);
+      setMarquee((m) => (m ? { ...m, x1: x, y1: y } : m));
+      return;
+    }
     if (!drag) return;
     const deltaMs = (e.clientX - drag.startX) / pxPerMs;
     const alt = e.altKey; // hold Alt to disable snapping
     const edges = alt ? [] : snapEdgesFor(drag.clipId);
     const span = drag.originEndMs - drag.originStartMs;
 
-    if (drag.mode === "move") {
+    if (drag.mode === "move" && drag.group) {
+      // Group move: shift every selected clip by ONE shared delta. No cross-track move
+      // and no snapping (keeps the group rigid + predictable); clamp so the group's
+      // left-most clip never crosses 0.
+      let groupDelta = deltaMs;
+      let minStart = Infinity;
+      for (const id of selectedClipIdsRef.current) {
+        const c = clipById(id);
+        if (c) minStart = Math.min(minStart, c.startOnTimeline);
+      }
+      if (minStart !== Infinity && minStart + groupDelta < 0) groupDelta = -minStart;
+      const start = Math.max(0, drag.originStartMs + groupDelta);
+      setPreview({
+        startMs: start,
+        endMs: start + span,
+        trackId: drag.trackId,
+        snapX: null,
+        groupDeltaMs: groupDelta,
+      });
+    } else if (drag.mode === "move") {
       let start = Math.max(0, drag.originStartMs + deltaMs);
       // Snap whichever edge (start/end) lands closest to a candidate.
       const s = snapMs(start, edges);
@@ -383,10 +509,22 @@ export default function Timeline() {
     }
   };
 
-  // Commit the transient drag to the store as a SINGLE undoable op.
+  // Commit the transient drag to the store as a SINGLE undoable op (also finalizes a
+  // marquee: select all clips intersecting the rubber-band rectangle on pointer-up).
   const endDrag = (): void => {
+    if (marquee) {
+      // A near-zero drag is treated as an empty-space click (already cleared on down).
+      const moved = Math.abs(marquee.x1 - marquee.x0) > 3 || Math.abs(marquee.y1 - marquee.y0) > 3;
+      if (moved) selectClips(clipsInRect(marquee));
+      setMarquee(null);
+      return;
+    }
     if (drag && preview) {
-      if (drag.mode === "move") {
+      if (drag.mode === "move" && drag.group) {
+        // Commit the whole group as a single undo step (the store re-derives the delta
+        // from the anchor's landing spot and applies it to every selected clip).
+        groupMoveClips(selectedClipIdsRef.current, drag.clipId, preview.startMs);
+      } else if (drag.mode === "move") {
         moveClip(drag.clipId, preview.trackId, preview.startMs);
       } else if (drag.mode === "trim-start") {
         trimClip(drag.clipId, "start", preview.startMs);
@@ -557,6 +695,7 @@ export default function Timeline() {
           <div
             className="relative"
             style={{ width: contentWidthPx }}
+            onPointerDown={onBodyPointerDown}
             onPointerMove={onBodyPointerMove}
             onPointerUp={endDrag}
             onPointerLeave={endDrag}
@@ -567,6 +706,9 @@ export default function Timeline() {
                 track={track}
                 pxPerMs={pxPerMs}
                 selectionId={selection.id}
+                selectedSet={selectedSet}
+                groupDragActive={!!drag?.group}
+                groupDeltaMs={drag?.group ? (preview?.groupDeltaMs ?? 0) : 0}
                 dragClipId={drag?.clipId ?? null}
                 dragPreview={preview}
                 placeholderSlots={placeholderSlots}
@@ -580,6 +722,20 @@ export default function Timeline() {
                 }}
               />
             ))}
+
+            {/* Marquee rubber-band (sky-blue, translucent) while drag-selecting. */}
+            {marquee && (
+              <div
+                aria-hidden="true"
+                className="pointer-events-none absolute z-sticky border border-vf-selection bg-vf-selection/15"
+                style={{
+                  left: Math.min(marquee.x0, marquee.x1),
+                  top: Math.min(marquee.y0, marquee.y1),
+                  width: Math.abs(marquee.x1 - marquee.x0),
+                  height: Math.abs(marquee.y1 - marquee.y0),
+                }}
+              />
+            )}
 
             {/* Snap-line affordance (orange) during a drag (§6.6). */}
             {preview?.snapX != null && (
@@ -955,6 +1111,9 @@ function TrackBody({
   track,
   pxPerMs,
   selectionId,
+  selectedSet,
+  groupDragActive,
+  groupDeltaMs,
   dragClipId,
   dragPreview,
   placeholderSlots,
@@ -967,6 +1126,9 @@ function TrackBody({
   track: Track;
   pxPerMs: number;
   selectionId: string | null;
+  selectedSet: Set<string>;
+  groupDragActive: boolean;
+  groupDeltaMs: number;
   dragClipId: string | null;
   dragPreview: DragPreview | null;
   placeholderSlots: Map<string, SlotInfo>;
@@ -1059,19 +1221,35 @@ function TrackBody({
                 <div className="absolute inset-0 flex items-center px-3 text-[10px] text-vf-text-tertiary/70 pointer-events-none">
                   Drag a clip here, or double-click media to add it
                 </div>
-              ) : track.clips.map((clip) => (
+              ) : track.clips.map((clip) => {
+                const inGroupSel = selectedSet.has(clip.id);
+                // Anchor renders at the live drag preview; other group members render
+                // shifted by the shared group delta so the whole selection moves.
+                const override: DragPreview | null =
+                  clip.id === dragClipId
+                    ? dragPreview
+                    : groupDragActive && inGroupSel
+                      ? {
+                          startMs: Math.max(0, clip.startOnTimeline + groupDeltaMs),
+                          endMs: Math.max(0, clip.endOnTimeline + groupDeltaMs),
+                          trackId: track.id,
+                          snapX: null,
+                        }
+                      : null;
+                return (
                 <MediaClipBlock
                   key={clip.id}
                   clip={clip}
                   track={track}
                   pxPerMs={pxPerMs}
-                  selected={selectionId === clip.id}
-                  previewOverride={clip.id === dragClipId ? dragPreview : null}
+                  selected={selectionId === clip.id || inGroupSel}
+                  previewOverride={override}
                   slotInfo={placeholderSlots.get(clip.id) ?? null}
                   onClipDown={onClipDown}
                   onContextMenu={(x, y) => onClipContextMenu(clip.id, track.id, x, y)}
                 />
-              ))}
+                );
+              })}
             </>
           )}
     </div>

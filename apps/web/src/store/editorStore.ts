@@ -86,11 +86,37 @@ function validateSelection(project: Project, sel: Selection): Selection {
   return { kind: null, id: null };
 }
 
+/** Drop any multi-selected clip ids that no longer exist (after undo/redo/delete). */
+function pruneSelectedClipIds(project: Project, ids: string[]): string[] {
+  if (ids.length === 0) return ids;
+  const live = new Set<string>();
+  for (const track of project.tracks) {
+    const clips = (track as any).clips as Array<{ id: string }> | undefined;
+    if (clips && (track.type === "video" || track.type === "audio" || track.type === "voiceover")) {
+      for (const c of clips) live.add(c.id);
+    }
+  }
+  const kept = ids.filter((id) => live.has(id));
+  return kept.length === ids.length ? ids : kept;
+}
+
 export type AddTrackKind = "video" | "audio" | "voiceover" | "overlay";
 
 export interface EditorState {
   project: Project;
   selection: Selection;
+  /**
+   * Multi-selection of MEDIA clip ids (timeline marquee / Shift/Ctrl-click / group
+   * move + delete). The single-clip `selection` above remains the "primary" (the
+   * last clip touched) so existing single-selection consumers (Inspector, Canvas,
+   * TemplateSlotPanel) keep working unchanged. Invariants kept in sync by the
+   * selection actions below:
+   *   • when a single clip is selected, selectedClipIds === { that id }
+   *   • when selecting a non-clip (overlay/caption/track) or clearing, this is empty
+   *   • `selection.id` is always the most recently added member (or null when empty)
+   * Stored as a string[] (not a Set) so it stays Immer/structural-clone friendly.
+   */
+  selectedClipIds: string[];
   /** Playhead position on the timeline, integer ms. */
   playheadMs: number;
   isPlaying: boolean;
@@ -126,6 +152,15 @@ export interface EditorActions {
   select: (kind: SelectionKind, id: string | null) => void;
   clearSelection: () => void;
   /**
+   * Add/toggle a single media clip in the multi-selection (Shift/Ctrl-click). The
+   * toggled clip becomes the primary `selection` (or, when toggled off, the primary
+   * falls back to the last remaining member). Non-clip selections are replaced.
+   */
+  toggleClipSelection: (clipId: string) => void;
+  /** Replace the multi-selection with exactly these media clip ids (marquee result). */
+  selectClips: (clipIds: string[]) => void;
+  /** True when a media clip id is part of the current multi-selection. */
+  /**
    * Add a clip referencing `assetId` to `trackId` at `atMs`. `sourceDurationMs` is
    * the asset's real source length (from the asset registry); when omitted the clip
    * falls back to a default span. The clip spans the full source (trimIn=0).
@@ -143,6 +178,14 @@ export interface EditorActions {
    */
   addClipToCanvas: (assetId: string, atMs: number, sourceDurationMs?: number) => void;
   moveClip: (clipId: string, toTrackId: string, startMs: number) => void;
+  /**
+   * Move every clip in `clipIds` by the same timeline delta as ONE undo step (group
+   * drag). `anchorClipId`/`anchorToStartMs` describe where the dragged (anchor) clip
+   * should land; the delta is applied to all selected clips (and their linked-audio
+   * partners). Clips on locked tracks are skipped. No cross-track move for the group
+   * (the anchor may change lane via the single-clip path; the group preserves lanes).
+   */
+  groupMoveClips: (clipIds: string[], anchorClipId: string, anchorToStartMs: number) => void;
   trimClip: (clipId: string, edge: "start" | "end", newMs: number) => void;
   splitAtPlayhead: () => void;
   deleteSelected: () => void;
@@ -433,6 +476,7 @@ export const useEditorStore = create<EditorStore>()(
       // ── Initial state (seeded from the sample project) ──
       project: sampleProject,
       selection: { kind: null, id: null },
+      selectedClipIds: [],
       playheadMs: 0,
       isPlaying: false,
       zoom: DEFAULT_PX_PER_SECOND,
@@ -463,6 +507,7 @@ export const useEditorStore = create<EditorStore>()(
           } as typeof p;
           s.project = normalized;
           s.selection = { kind: null, id: null };
+          s.selectedClipIds = [];
           s.playheadMs = 0;
           s.isPlaying = false;
           // A freshly loaded project starts a new history timeline.
@@ -499,10 +544,39 @@ export const useEditorStore = create<EditorStore>()(
       select: (kind, id) =>
         set((s) => {
           s.selection = { kind, id };
+          // Keep the multi-selection in lockstep with the primary: a plain clip
+          // select collapses the group to that one clip; selecting anything else
+          // (overlay/caption/track) or nothing clears the group.
+          s.selectedClipIds = kind === "clip" && id ? [id] : [];
         }),
       clearSelection: () =>
         set((s) => {
           s.selection = { kind: null, id: null };
+          s.selectedClipIds = [];
+        }),
+
+      /** Shift/Ctrl-click: add `clipId` if absent, else remove it. */
+      toggleClipSelection: (clipId) =>
+        set((s) => {
+          const has = s.selectedClipIds.includes(clipId);
+          if (has) {
+            s.selectedClipIds = s.selectedClipIds.filter((id) => id !== clipId);
+            // Primary falls back to the last remaining member (or nothing).
+            const last = s.selectedClipIds[s.selectedClipIds.length - 1] ?? null;
+            s.selection = last ? { kind: "clip", id: last } : { kind: null, id: null };
+          } else {
+            s.selectedClipIds = [...s.selectedClipIds, clipId];
+            s.selection = { kind: "clip", id: clipId };
+          }
+        }),
+
+      /** Marquee result: replace the multi-selection with exactly `clipIds`. */
+      selectClips: (clipIds) =>
+        set((s) => {
+          const ids = [...new Set(clipIds)];
+          s.selectedClipIds = ids;
+          const last = ids[ids.length - 1] ?? null;
+          s.selection = last ? { kind: "clip", id: last } : { kind: null, id: null };
         }),
 
       // Client placeholder labels (for TemplatesPanel apply flow + canvas/timeline rendering)
@@ -521,6 +595,7 @@ export const useEditorStore = create<EditorStore>()(
         set((s) => {
           s.pendingMediaOpenFor = clipId;
           s.selection = { kind: "clip", id: clipId };
+          s.selectedClipIds = [clipId];
         }),
 
       /** Suppress "Save failed — retrying" UI in StatusBar for N ms (used after fresh template apply). */
@@ -591,6 +666,7 @@ export const useEditorStore = create<EditorStore>()(
         });
         set((s) => {
           s.selection = { kind: "clip", id: clipId };
+          s.selectedClipIds = [clipId];
         });
       },
 
@@ -624,6 +700,7 @@ export const useEditorStore = create<EditorStore>()(
         });
         set((s) => {
           s.selection = { kind: "clip", id: clipId };
+          s.selectedClipIds = [clipId];
         });
       },
 
@@ -661,6 +738,48 @@ export const useEditorStore = create<EditorStore>()(
               linked.clip.startOnTimeline = ns;
               linked.clip.endOnTimeline = ns + lspan;
             }
+          }
+        });
+      },
+
+      groupMoveClips: (clipIds, anchorClipId, anchorToStartMs) => {
+        commit((project) => {
+          const anchor = findClip(project, anchorClipId);
+          if (!anchor) return;
+          // Delta is computed from the anchor's requested landing spot, then clamped
+          // so NO selected clip is pushed before 0 (keeps the whole group in bounds).
+          let delta = ms(anchorToStartMs) - anchor.clip.startOnTimeline;
+
+          // Build the full set of clips to move: the selection + each one's linked
+          // partner (so linked audio rides along even if it wasn't explicitly selected).
+          const moveIds = new Set<string>();
+          for (const id of clipIds) {
+            const f = findClip(project, id);
+            if (!f) continue;
+            // Skip clips whose track is locked (respect locked-track constraint).
+            if (f.track.locked) continue;
+            moveIds.add(id);
+            const linkedId = f.clip.linkedClipId ?? null;
+            if (linkedId && findClip(project, linkedId)) moveIds.add(linkedId);
+          }
+          if (moveIds.size === 0) return;
+
+          // Clamp the delta to the group's left edge so nothing crosses 0.
+          let minStart = Infinity;
+          for (const id of moveIds) {
+            const f = findClip(project, id);
+            if (f) minStart = Math.min(minStart, f.clip.startOnTimeline);
+          }
+          if (minStart + delta < 0) delta = -minStart;
+          if (delta === 0) return;
+
+          for (const id of moveIds) {
+            const f = findClip(project, id);
+            if (!f) continue;
+            const span = f.clip.endOnTimeline - f.clip.startOnTimeline;
+            const ns = Math.max(0, f.clip.startOnTimeline + delta);
+            f.clip.startOnTimeline = ns;
+            f.clip.endOnTimeline = ns + span;
           }
         });
       },
@@ -783,34 +902,38 @@ export const useEditorStore = create<EditorStore>()(
       },
 
       deleteSelected: () => {
-        const { selection } = get();
+        const { selection, selectedClipIds } = get();
         if (!selection.id || selection.kind === null) return;
         const { kind, id } = selection;
         commit((project) => {
           switch (kind) {
             case "clip": {
-              // F14: cascade delete linked clip (video + audio together)
-              let linkedId: string | null = null;
-              for (const track of project.tracks) {
-                if (!isMediaTrack(track)) continue;
-                const hit = track.clips.find((c) => c.id === id);
-                if (hit && (hit as any).linkedClipId) linkedId = (hit as any).linkedClipId;
-                // Also check if this clip is the linked target of the one being deleted
-                track.clips = track.clips.filter((c) => {
-                  if (c.id === id) return false;
-                  if ((c as any).linkedClipId === id) { linkedId = c.id; return false; }
-                  return true;
-                });
-              }
-              if (linkedId) {
+              // Group delete (§3 multi-select): remove EVERY selected media clip plus
+              // each one's linked-audio partner, as a single undo step. Falls back to
+              // the primary id when the multi-selection is empty/out of sync.
+              const seeds = selectedClipIds.length > 0 ? selectedClipIds : [id];
+              const removeIds = new Set<string>();
+              for (const seed of seeds) {
+                removeIds.add(seed);
+                // The seed's own linked partner.
+                const f = findClip(project, seed);
+                const linked = (f?.clip.linkedClipId as string | null | undefined) ?? null;
+                if (linked) removeIds.add(linked);
+                // Any clip that links TO the seed (the reverse direction).
                 for (const track of project.tracks) {
                   if (!isMediaTrack(track)) continue;
-                  track.clips = track.clips.filter((c) => c.id !== linkedId);
+                  for (const c of track.clips) {
+                    if ((c as any).linkedClipId === seed) removeIds.add(c.id);
+                  }
                 }
               }
-              // Drop any transition that referenced the removed clip.
+              for (const track of project.tracks) {
+                if (!isMediaTrack(track)) continue;
+                track.clips = track.clips.filter((c) => !removeIds.has(c.id));
+              }
+              // Drop any transition that referenced a removed clip.
               project.transitions = project.transitions.filter(
-                (t) => t.fromClipId !== id && t.toClipId !== id,
+                (t) => !removeIds.has(t.fromClipId) && !removeIds.has(t.toClipId),
               );
               break;
             }
@@ -836,6 +959,7 @@ export const useEditorStore = create<EditorStore>()(
         });
         set((s) => {
           s.selection = { kind: null, id: null };
+          s.selectedClipIds = [];
         });
       },
 
@@ -896,6 +1020,7 @@ export const useEditorStore = create<EditorStore>()(
         });
         set((s) => {
           s.selection = { kind: null, id: null };
+          s.selectedClipIds = [];
         });
       },
 
@@ -943,6 +1068,7 @@ export const useEditorStore = create<EditorStore>()(
         if (kind === "clip" || kind === "overlay") {
           set((s) => {
             s.selection = { kind, id: newId };
+            s.selectedClipIds = kind === "clip" ? [newId] : [];
           });
         }
       },
@@ -1012,7 +1138,9 @@ export const useEditorStore = create<EditorStore>()(
         });
         // select the pasted item
         set((s) => {
-          s.selection = { kind: clipboard.kind === "clip" ? "clip" : "overlay", id: newId };
+          const k = clipboard.kind === "clip" ? "clip" : "overlay";
+          s.selection = { kind: k, id: newId };
+          s.selectedClipIds = k === "clip" ? [newId] : [];
         });
       },
 
@@ -1035,6 +1163,7 @@ export const useEditorStore = create<EditorStore>()(
           // We call the internal setter to avoid re-entrancy with commit.
           set((s) => {
             s.selection = { kind: "track", id: newTrackId };
+            s.selectedClipIds = [];
           });
         }
       },
@@ -1101,9 +1230,11 @@ export const useEditorStore = create<EditorStore>()(
         if (!historyCanUndo(state._history)) return;
         const { state: project, history } = historyUndo(state.project, state._history);
         const nextSel = validateSelection(project, state.selection);
+        const nextClipIds = pruneSelectedClipIds(project, state.selectedClipIds);
         set((s) => {
           s.project = project;
           s.selection = nextSel;
+          s.selectedClipIds = nextClipIds;
           s._history = history;
           s._canUndo = historyCanUndo(history);
           s._canRedo = historyCanRedo(history);
@@ -1114,9 +1245,11 @@ export const useEditorStore = create<EditorStore>()(
         if (!historyCanRedo(state._history)) return;
         const { state: project, history } = historyRedo(state.project, state._history);
         const nextSel = validateSelection(project, state.selection);
+        const nextClipIds = pruneSelectedClipIds(project, state.selectedClipIds);
         set((s) => {
           s.project = project;
           s.selection = nextSel;
+          s.selectedClipIds = nextClipIds;
           s._history = history;
           s._canUndo = historyCanUndo(history);
           s._canRedo = historyCanRedo(history);
@@ -1347,6 +1480,7 @@ export const useEditorStore = create<EditorStore>()(
         });
         set((s) => {
           s.selection = { kind: "overlay", id: overlayId };
+          s.selectedClipIds = [];
         });
       },
 

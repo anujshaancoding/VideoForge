@@ -15,7 +15,14 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { eq, and } from 'drizzle-orm';
-import { DeleteObjectCommand } from '@aws-sdk/client-s3';
+import {
+  DeleteObjectCommand,
+  CreateMultipartUploadCommand,
+  UploadPartCommand,
+  CompleteMultipartUploadCommand,
+  AbortMultipartUploadCommand,
+} from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { db } from '../db/client.js';
 import { assets } from '../db/schema.js';
 import {
@@ -85,6 +92,43 @@ interface PresignBody {
 
 interface PatchAssetBody {
   filename?: unknown;
+}
+
+// ── Multipart upload body shapes (§3.1 resumable chunked upload) ───────────────
+
+/** Presign a batch of UploadPart URLs for the given 1-based part numbers. */
+interface MultipartPartsBody {
+  uploadId?: unknown;
+  partNumbers?: unknown;
+}
+
+/** A single completed part: its number + the ETag S3 returned on UploadPart. */
+interface CompletedPart {
+  partNumber: number;
+  eTag: string;
+}
+
+/** CompleteMultipartUpload — the collected ETags (any order; server sorts). */
+interface MultipartCompleteBody {
+  uploadId?: unknown;
+  parts?: unknown;
+}
+
+/** AbortMultipartUpload — discard the in-progress upload's parts. */
+interface MultipartAbortBody {
+  uploadId?: unknown;
+}
+
+/** Cap on parts presigned per request — bounds work + URL count per call. */
+const MAX_PARTS_PER_BATCH = 1000;
+
+/** Load the caller's own asset row, or null if it doesn't exist / isn't theirs. */
+async function loadOwnedAsset(workspaceId: string, assetId: string) {
+  const [row] = await db
+    .select()
+    .from(assets)
+    .where(and(eq(assets.id, assetId), eq(assets.workspaceId, workspaceId)));
+  return row ?? null;
 }
 
 // ── Route plugin ─────────────────────────────────────────────────────────────
@@ -177,6 +221,174 @@ export async function assetRoutes(app: FastifyInstance): Promise<void> {
       expiresAt,
     });
   });
+
+  // ── Multipart upload (§3.1 resumable chunked upload) ─────────────────────────
+  // For large files the client splits the File into ~10 MB parts and uploads them
+  // with bounded concurrency, retrying only the parts that fail (in-session resume).
+  // The asset row + dedup/confirm flow is identical to the single-shot path — these
+  // routes only manage the S3 multipart machinery against the existing s3KeyOriginal.
+
+  // POST /api/v1/assets/:id/multipart — CreateMultipartUpload → uploadId + key.
+  app.post<{ Params: { id: string } }>(
+    '/:id/multipart',
+    async (request, reply) => {
+      const row = await loadOwnedAsset(request.user.userId, request.params.id);
+      if (!row) {
+        return reply
+          .code(404)
+          .send({ error: 'NotFound', message: 'asset not found' });
+      }
+      const key = row.s3KeyOriginal ?? `${row.id}/original`;
+      const created = await s3.send(
+        new CreateMultipartUploadCommand({
+          Bucket: BUCKET_ORIGINALS,
+          Key: key,
+          ContentType: row.contentType,
+        }),
+      );
+      if (!created.UploadId) {
+        return reply.code(502).send({
+          error: 'UpstreamError',
+          message: 'S3 did not return an upload id',
+        });
+      }
+      return reply.code(201).send({ uploadId: created.UploadId, key });
+    },
+  );
+
+  // POST /api/v1/assets/:id/multipart/parts — presign a batch of UploadPart URLs.
+  app.post<{ Params: { id: string }; Body: MultipartPartsBody }>(
+    '/:id/multipart/parts',
+    async (request, reply) => {
+      const row = await loadOwnedAsset(request.user.userId, request.params.id);
+      if (!row) {
+        return reply
+          .code(404)
+          .send({ error: 'NotFound', message: 'asset not found' });
+      }
+      const body = request.body ?? {};
+      const uploadId = typeof body.uploadId === 'string' ? body.uploadId : '';
+      const partNumbers = Array.isArray(body.partNumbers)
+        ? body.partNumbers.filter(
+            (n): n is number =>
+              Number.isInteger(n) && (n as number) >= 1 && (n as number) <= 10_000,
+          )
+        : [];
+      if (!uploadId || partNumbers.length === 0) {
+        return reply.code(400).send({
+          error: 'BadRequest',
+          message: 'uploadId and a non-empty partNumbers[] are required',
+        });
+      }
+      if (partNumbers.length > MAX_PARTS_PER_BATCH) {
+        return reply.code(400).send({
+          error: 'BadRequest',
+          message: `at most ${MAX_PARTS_PER_BATCH} parts per request`,
+        });
+      }
+      const key = row.s3KeyOriginal ?? `${row.id}/original`;
+      const urls = await Promise.all(
+        partNumbers.map(async (partNumber) => ({
+          partNumber,
+          url: await getSignedUrl(
+            s3,
+            new UploadPartCommand({
+              Bucket: BUCKET_ORIGINALS,
+              Key: key,
+              UploadId: uploadId,
+              PartNumber: partNumber,
+            }),
+            { expiresIn: 3600 },
+          ),
+        })),
+      );
+      return reply.code(200).send({ parts: urls });
+    },
+  );
+
+  // POST /api/v1/assets/:id/multipart/complete — CompleteMultipartUpload (ETags).
+  app.post<{ Params: { id: string }; Body: MultipartCompleteBody }>(
+    '/:id/multipart/complete',
+    async (request, reply) => {
+      const row = await loadOwnedAsset(request.user.userId, request.params.id);
+      if (!row) {
+        return reply
+          .code(404)
+          .send({ error: 'NotFound', message: 'asset not found' });
+      }
+      const body = request.body ?? {};
+      const uploadId = typeof body.uploadId === 'string' ? body.uploadId : '';
+      const rawParts = Array.isArray(body.parts) ? body.parts : [];
+      const parts: CompletedPart[] = rawParts
+        .map((p): CompletedPart | null => {
+          if (typeof p !== 'object' || p === null) return null;
+          const { partNumber, eTag } = p as Record<string, unknown>;
+          if (!Number.isInteger(partNumber) || typeof eTag !== 'string') {
+            return null;
+          }
+          return { partNumber: partNumber as number, eTag };
+        })
+        .filter((p): p is CompletedPart => p !== null)
+        // S3 requires parts in ascending PartNumber order.
+        .sort((a, b) => a.partNumber - b.partNumber);
+      if (!uploadId || parts.length === 0) {
+        return reply.code(400).send({
+          error: 'BadRequest',
+          message: 'uploadId and a non-empty parts[] are required',
+        });
+      }
+      const key = row.s3KeyOriginal ?? `${row.id}/original`;
+      await s3.send(
+        new CompleteMultipartUploadCommand({
+          Bucket: BUCKET_ORIGINALS,
+          Key: key,
+          UploadId: uploadId,
+          MultipartUpload: {
+            Parts: parts.map((p) => ({
+              PartNumber: p.partNumber,
+              ETag: p.eTag,
+            })),
+          },
+        }),
+      );
+      return reply.code(200).send({ id: row.id, key });
+    },
+  );
+
+  // POST /api/v1/assets/:id/multipart/abort — AbortMultipartUpload (cleanup).
+  app.post<{ Params: { id: string }; Body: MultipartAbortBody }>(
+    '/:id/multipart/abort',
+    async (request, reply) => {
+      const row = await loadOwnedAsset(request.user.userId, request.params.id);
+      if (!row) {
+        return reply
+          .code(404)
+          .send({ error: 'NotFound', message: 'asset not found' });
+      }
+      const body = request.body ?? {};
+      const uploadId = typeof body.uploadId === 'string' ? body.uploadId : '';
+      if (!uploadId) {
+        return reply
+          .code(400)
+          .send({ error: 'BadRequest', message: 'uploadId is required' });
+      }
+      const key = row.s3KeyOriginal ?? `${row.id}/original`;
+      // Best-effort: a failed abort just leaves orphaned parts (S3 lifecycle can
+      // reap them), so it must not surface as a hard error to the client.
+      try {
+        await s3.send(
+          new AbortMultipartUploadCommand({
+            Bucket: BUCKET_ORIGINALS,
+            Key: key,
+            UploadId: uploadId,
+          }),
+        );
+      } catch {
+        // swallow — abort is cleanup, not a user-facing operation
+      }
+      return reply.code(204).send();
+    },
+  );
 
   // POST /api/v1/assets/:id/confirm — finish upload; enqueue proxy/waveform job.
   app.post<{ Params: { id: string } }>(

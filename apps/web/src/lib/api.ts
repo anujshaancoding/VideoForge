@@ -396,6 +396,190 @@ export function apiUploadToS3(
   });
 }
 
+// ── Resumable multipart upload (§3.1) ──────────────────────────────────────────
+// Large files are split into ≤10 MB parts and uploaded with BOUNDED concurrency so
+// the upload is CPU/network-bounded by design (memory rule). A failed part is
+// retried a few times; completed parts (partNumber → ETag) are tracked in memory so
+// a retry re-uploads only the missing parts within the session (in-session resume).
+
+/** S3 minimum part size is 5 MB; we use the 10 MB advertised by /presign. */
+export const MULTIPART_PART_SIZE = 10 * 1024 * 1024;
+/** Files smaller than this stay on the simple single-shot PUT path. */
+export const MULTIPART_THRESHOLD = MULTIPART_PART_SIZE;
+/** Max parts uploaded in parallel — caps concurrent XHRs (resource-bounded). */
+const MULTIPART_CONCURRENCY = 4;
+/** Per-part retry attempts before the whole upload fails. */
+const MULTIPART_PART_RETRIES = 3;
+
+interface MultipartInitResponse {
+  uploadId: string;
+  key: string;
+}
+interface MultipartPartUrl {
+  partNumber: number;
+  url: string;
+}
+interface MultipartPartsResponse {
+  parts: MultipartPartUrl[];
+}
+
+async function apiMultipartInit(assetId: string): Promise<MultipartInitResponse> {
+  return request<MultipartInitResponse>(`/assets/${assetId}/multipart`, { method: 'POST' });
+}
+
+async function apiMultipartPartUrls(
+  assetId: string,
+  uploadId: string,
+  partNumbers: number[],
+): Promise<MultipartPartUrl[]> {
+  const res = await request<MultipartPartsResponse>(`/assets/${assetId}/multipart/parts`, {
+    method: 'POST',
+    body: JSON.stringify({ uploadId, partNumbers }),
+  });
+  return res.parts;
+}
+
+async function apiMultipartComplete(
+  assetId: string,
+  uploadId: string,
+  parts: Array<{ partNumber: number; eTag: string }>,
+): Promise<void> {
+  await request(`/assets/${assetId}/multipart/complete`, {
+    method: 'POST',
+    body: JSON.stringify({ uploadId, parts }),
+  });
+}
+
+async function apiMultipartAbort(assetId: string, uploadId: string): Promise<void> {
+  try {
+    await request(`/assets/${assetId}/multipart/abort`, {
+      method: 'POST',
+      body: JSON.stringify({ uploadId }),
+    });
+  } catch {
+    // Abort is best-effort cleanup; never let it mask the original failure.
+  }
+}
+
+/** PUT one part blob to its presigned URL, resolving the S3 ETag from the response. */
+function putPart(url: string, blob: Blob, onChunkProgress: (loaded: number) => void): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', url);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onChunkProgress(e.loaded);
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        // S3 returns the part ETag in the response header; it's required by Complete.
+        const eTag = xhr.getResponseHeader('ETag');
+        if (eTag) resolve(eTag);
+        else reject(new Error('S3 part upload returned no ETag'));
+      } else {
+        reject(new Error(`S3 part upload failed: ${xhr.status} ${xhr.statusText}`));
+      }
+    };
+    xhr.onerror = () => reject(new Error('S3 part upload network error'));
+    xhr.onabort = () => reject(new Error('S3 part upload aborted'));
+    xhr.send(blob);
+  });
+}
+
+/**
+ * Upload a File to S3 using multipart, with bounded concurrency + per-part retry
+ * and in-session resume. Reports aggregate byte progress (0–100). On success the
+ * upload is completed server-side (CompleteMultipartUpload); on unrecoverable
+ * failure the multipart upload is aborted (cleanup) and the error re-thrown.
+ *
+ * `completedParts` is an OUT param: pass the same Map across retries of the SAME
+ * uploadId to skip re-uploading parts that already succeeded (in-session resume).
+ */
+export async function apiMultipartUpload(
+  assetId: string,
+  file: File,
+  onProgress?: (pct: number) => void,
+  completedParts: Map<number, string> = new Map<number, string>(),
+): Promise<void> {
+  const partCount = Math.ceil(file.size / MULTIPART_PART_SIZE);
+  const { uploadId } = await apiMultipartInit(assetId);
+
+  // Aggregate progress: sum of bytes uploaded across all in-flight + done parts.
+  // Already-completed parts (resume) count as fully uploaded up-front.
+  const partLoaded = new Array<number>(partCount + 1).fill(0);
+  for (const pn of completedParts.keys()) {
+    partLoaded[pn] = Math.min(MULTIPART_PART_SIZE, file.size - (pn - 1) * MULTIPART_PART_SIZE);
+  }
+  const reportProgress = (): void => {
+    if (!onProgress) return;
+    const loaded = partLoaded.reduce((a, b) => a + b, 0);
+    onProgress(Math.min(100, Math.round((loaded / file.size) * 100)));
+  };
+  reportProgress();
+
+  // Only the parts not already completed need uploading (in-session resume).
+  const pending: number[] = [];
+  for (let pn = 1; pn <= partCount; pn++) {
+    if (!completedParts.has(pn)) pending.push(pn);
+  }
+
+  try {
+    let cursor = 0;
+    const uploadOne = async (partNumber: number): Promise<void> => {
+      const start = (partNumber - 1) * MULTIPART_PART_SIZE;
+      const blob = file.slice(start, Math.min(start + MULTIPART_PART_SIZE, file.size));
+      let lastErr: unknown;
+      for (let attempt = 0; attempt <= MULTIPART_PART_RETRIES; attempt++) {
+        try {
+          // Presign per attempt so an expired URL on a slow retry is refreshed.
+          const presigned = await apiMultipartPartUrls(assetId, uploadId, [partNumber]);
+          const url = presigned[0]?.url;
+          if (!url) throw new Error(`No presigned URL returned for part ${partNumber}`);
+          const eTag = await putPart(url, blob, (loaded) => {
+            partLoaded[partNumber] = loaded;
+            reportProgress();
+          });
+          completedParts.set(partNumber, eTag);
+          partLoaded[partNumber] = blob.size;
+          reportProgress();
+          return;
+        } catch (err) {
+          lastErr = err;
+          partLoaded[partNumber] = 0;
+          // Exponential-ish backoff between part retries (250ms, 500ms, 1s…).
+          if (attempt < MULTIPART_PART_RETRIES) {
+            await new Promise<void>((r) => setTimeout(r, 250 * 2 ** attempt));
+          }
+        }
+      }
+      throw lastErr instanceof Error ? lastErr : new Error('part upload failed');
+    };
+
+    // Bounded worker pool: at most MULTIPART_CONCURRENCY parts upload at once.
+    const worker = async (): Promise<void> => {
+      while (cursor < pending.length) {
+        const partNumber = pending[cursor++]!;
+        await uploadOne(partNumber);
+      }
+    };
+    const workers = Array.from(
+      { length: Math.min(MULTIPART_CONCURRENCY, pending.length) },
+      () => worker(),
+    );
+    await Promise.all(workers);
+
+    const parts = Array.from(completedParts.entries())
+      .map(([partNumber, eTag]) => ({ partNumber, eTag }))
+      .sort((a, b) => a.partNumber - b.partNumber);
+    await apiMultipartComplete(assetId, uploadId, parts);
+    onProgress?.(100);
+  } catch (err) {
+    // Unrecoverable: discard the in-progress S3 upload so we don't leak parts.
+    // (completedParts is kept in memory by the caller for a fresh-session retry.)
+    await apiMultipartAbort(assetId, uploadId);
+    throw err;
+  }
+}
+
 export async function apiConfirmUpload(assetId: string): Promise<AssetRecord> {
   return request<AssetRecord>(`/assets/${assetId}/confirm`, { method: 'POST' });
 }

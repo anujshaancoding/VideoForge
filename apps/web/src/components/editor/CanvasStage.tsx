@@ -53,6 +53,11 @@ export default function CanvasStage() {
   // Live box while dragging/resizing on the canvas (committed to the store on release,
   // so a whole gesture is ONE undo step — not hundreds, mirroring the timeline drag).
   const [dragBox, setDragBox] = useState<Box | null>(null);
+  // Transient alignment guides (percent positions) shown only while a drag/resize is
+  // snapped to canvas center/edges. Sky-blue (brand selection colour). Preview-only UX:
+  // the COMMITTED value is just a normal snapped transform, so the export is unaffected
+  // (no export change needed) — the guides never render to the canvas/engine output.
+  const [guides, setGuides] = useState<{ v: number[]; h: number[] }>({ v: [], h: [] });
   // For inline text editing on double-click (P1 gap: double-click text should enter edit mode in canvas)
   const [editingTextId, setEditingTextId] = useState<string | null>(null);
   // Ref to the inline contentEditable box so we can focus it + place the caret
@@ -268,13 +273,44 @@ export default function CanvasStage() {
     const clip = selectedClip;
     let live: Box = startBox;
 
+    // Snap-to-center / snap-to-edge while dragging (alignment snapping). Threshold is a
+    // small fraction of the canvas; when an edge or the box center lands within it of a
+    // canvas guide line (0% / 50% / 100%), the value is nudged exactly onto the line and
+    // a transient sky-blue guide is drawn. This is preview-only UX — the committed box is
+    // an ordinary snapped transform, so the export geometry is unchanged.
+    const SNAP = 1.5; // percent threshold
+    const snap1d = (v: number, targets: number[]): { v: number; hit: number | null } => {
+      for (const t of targets) {
+        if (Math.abs(v - t) <= SNAP) return { v: t, hit: t };
+      }
+      return { v, hit: null };
+    };
+
     const onMove = (ev: PointerEvent): void => {
       const dx = ((ev.clientX - startX) / rect.width) * 100;
       const dy = ((ev.clientY - startY) / rect.height) * 100;
       let b: Box = { ...startBox };
+      const vGuides = new Set<number>();
+      const hGuides = new Set<number>();
       if (mode === "move") {
         b.x = startBox.x + dx;
         b.y = startBox.y + dy;
+        // Snap left edge, horizontal center, and right edge against canvas 0/50/100.
+        const cx = b.x + b.width / 2;
+        const left = snap1d(b.x, [0]);
+        const center = snap1d(cx, [50]);
+        const right = snap1d(b.x + b.width, [100]);
+        if (center.hit !== null) { b.x = center.v - b.width / 2; vGuides.add(50); }
+        else if (left.hit !== null) { b.x = 0; vGuides.add(0); }
+        else if (right.hit !== null) { b.x = 100 - b.width; vGuides.add(100); }
+        // Same for the vertical axis (top edge / vertical center / bottom edge).
+        const cy = b.y + b.height / 2;
+        const top = snap1d(b.y, [0]);
+        const middle = snap1d(cy, [50]);
+        const bottom = snap1d(b.y + b.height, [100]);
+        if (middle.hit !== null) { b.y = middle.v - b.height / 2; hGuides.add(50); }
+        else if (top.hit !== null) { b.y = 0; hGuides.add(0); }
+        else if (bottom.hit !== null) { b.y = 100 - b.height; hGuides.add(100); }
       } else {
         const right = startBox.x + startBox.width;
         const bottom = startBox.y + startBox.height;
@@ -286,6 +322,11 @@ export default function CanvasStage() {
         if (mode.includes("e")) nr = right + dx;
         if (mode.includes("n")) ny = startBox.y + dy;
         if (mode.includes("s")) nb = bottom + dy;
+        // Snap whichever edges are being dragged to the canvas edges/center.
+        if (mode.includes("w")) { const s = snap1d(nx, [0, 50]); if (s.hit !== null) { nx = s.v; vGuides.add(s.hit); } }
+        if (mode.includes("e")) { const s = snap1d(nr, [50, 100]); if (s.hit !== null) { nr = s.v; vGuides.add(s.hit); } }
+        if (mode.includes("n")) { const s = snap1d(ny, [0, 50]); if (s.hit !== null) { ny = s.v; hGuides.add(s.hit); } }
+        if (mode.includes("s")) { const s = snap1d(nb, [50, 100]); if (s.hit !== null) { nb = s.v; hGuides.add(s.hit); } }
         const MIN = 5; // percent floor so a box can't collapse
         b = {
           x: Math.min(nx, nr - MIN),
@@ -296,6 +337,7 @@ export default function CanvasStage() {
       }
       live = b;
       setDragBox(b);
+      setGuides({ v: [...vGuides], h: [...hGuides] });
     };
     const onUp = (): void => {
       window.removeEventListener("pointermove", onMove);
@@ -308,6 +350,7 @@ export default function CanvasStage() {
         height: r(live.height),
       });
       setDragBox(null);
+      setGuides({ v: [], h: [] });
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
@@ -614,6 +657,32 @@ export default function CanvasStage() {
               className="pointer-events-none absolute border border-dashed"
               style={{ inset: "10%", borderColor: "rgba(255,209,92,0.5)" }}
             />
+          </>
+        )}
+
+        {/* Alignment snapping guides (sky-blue, brand selection colour). Rendered only
+            while a drag/resize is snapped to a canvas edge/center. Pure preview-only UX:
+            never drawn to the engine output, so the export is unaffected. */}
+        {(guides.v.length > 0 || guides.h.length > 0) && (
+          <>
+            {guides.v.map((vx) => (
+              <div
+                key={`v-${vx}`}
+                aria-hidden="true"
+                data-testid="snap-guide-v"
+                className="pointer-events-none absolute top-0 bottom-0 z-[110] w-px bg-vf-selection"
+                style={{ left: `${vx}%` }}
+              />
+            ))}
+            {guides.h.map((hy) => (
+              <div
+                key={`h-${hy}`}
+                aria-hidden="true"
+                data-testid="snap-guide-h"
+                className="pointer-events-none absolute left-0 right-0 z-[110] h-px bg-vf-selection"
+                style={{ top: `${hy}%` }}
+              />
+            ))}
           </>
         )}
 

@@ -78,10 +78,15 @@ export default function Inspector() {
       <aside
         role="complementary"
         aria-label="Inspector"
-        className="flex h-full flex-col items-center justify-center gap-2 bg-vf-surface-1 px-6 text-center"
+        className="flex h-full min-h-0 flex-col bg-vf-surface-1"
       >
-        <MousePointer2 className="h-8 w-8 text-vf-text-disabled" aria-hidden="true" />
-        <p className="text-sm text-vf-text-tertiary">Select a clip to edit its properties.</p>
+        <div className="flex shrink-0 flex-col items-center gap-2 border-b border-vf-border-subtle px-6 py-6 text-center">
+          <MousePointer2 className="h-8 w-8 text-vf-text-disabled" aria-hidden="true" />
+          <p className="text-sm text-vf-text-tertiary">Select a clip to edit its properties.</p>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">
+          <CanvasInspector />
+        </div>
       </aside>
     );
   }
@@ -185,10 +190,50 @@ function Section({ title, children, action }: { title: string; children: React.R
   );
 }
 
+// ── Canvas inspector (empty-selection / project-level) ───────────────────────────
+// Background-color control. `canvas.backgroundColor` is rendered IDENTICALLY in the
+// preview (PreviewEngine fillRect + pad color) and the export (buildFilterComplex
+// `color=` base + per-clip `pad=...:color=`), so editing it here stays invariant-safe
+// (preview == export). There is no dedicated store action for the canvas field, so we
+// patch it via setState with an immer recipe — the same direct-mutation pattern the
+// CanvasStage inline text editor already uses (kept undo-history-free intentionally,
+// like that editor; a first-class setCanvasBackground action is a store-owner change).
+function CanvasInspector() {
+  const bgColor = useEditorStore((s) => s.project.canvas.backgroundColor) || "#111111";
+  const aspectRatio = useEditorStore((s) => s.project.canvas.aspectRatio);
+  const setBg = (hex: string) =>
+    useEditorStore.setState((s) => {
+      s.project.canvas.backgroundColor = hex;
+    });
+
+  return (
+    <Section title="Canvas">
+      <div className="flex items-center gap-2">
+        <label className="w-24 shrink-0 text-xs text-vf-text-secondary" htmlFor="canvas-bg-color">
+          Background
+        </label>
+        <input
+          id="canvas-bg-color"
+          type="color"
+          value={bgColor}
+          aria-label="Canvas background color"
+          onChange={(e) => setBg(e.target.value)}
+          className="h-7 w-10 cursor-pointer rounded-sm border border-vf-border-default bg-vf-surface-2"
+        />
+        <span className="text-xs text-vf-text-primary vf-tnum">{bgColor}</span>
+      </div>
+      <p className="text-2xs text-vf-text-tertiary">
+        ⓘ Fills letterbox/pillarbox bars + gaps. Renders identically in preview and export ({aspectRatio}).
+      </p>
+    </Section>
+  );
+}
+
 // ── Video clip inspector (Properties · Color · Keyframes · Ken Burns) ─────────────
 function VideoClipInspector({ clip }: { clip: Clip }) {
   const setClipColorGrade = useEditorStore((s) => s.setClipColorGrade);
   const setClipOpacity = useEditorStore((s) => s.setClipOpacity);
+  const setClipTransform = useEditorStore((s) => s.setClipTransform);
   const setClipSpeed = useEditorStore((s) => s.setClipSpeed);
   const addKeyframe = useEditorStore((s) => s.addKeyframe);
   const removeKeyframe = useEditorStore((s) => s.removeKeyframe);
@@ -238,6 +283,18 @@ function VideoClipInspector({ clip }: { clip: Clip }) {
     removeKeyframe(clip.id, clip.trackId, kfId);
   };
 
+  // On-canvas transform box (percent of canvas, x/y top-left, w/h size). ABSENT means
+  // the clip fills the frame — surface that as the full-frame default so the numeric
+  // fields read sensibly, EXACTLY mirroring CanvasStage's FULL_FRAME drag default and
+  // the export's clipBox (no transform → fill). Editing any field writes the WHOLE
+  // ClipTransform via the existing setClipTransform action — the same field the preview
+  // and the FFmpeg export both consume, so the numbers stay WYSIWYG (preview == export).
+  const tf = clip.transform ?? { x: 0, y: 0, width: 100, height: 100 };
+  const onTransformChange = (key: "x" | "y" | "width" | "height", raw: number) => {
+    const v = Number.isFinite(raw) ? Math.round(Math.max(0, Math.min(100, raw)) * 100) / 100 : 0;
+    setClipTransform(clip.id, clip.trackId, { ...tf, [key]: v });
+  };
+
   const onToggleKenBurns = () => {
     setClipKenBurns(
       clip.id,
@@ -259,6 +316,39 @@ function VideoClipInspector({ clip }: { clip: Clip }) {
   return (
     <>
       <Section title="Transform">
+        {/* Numeric X/Y/W/H (percent of canvas, 0–100) — the same percent model the
+            on-canvas drag box uses. Bound to setClipTransform; preview and export both
+            honour clip.transform, so typed values are WYSIWYG. Mirrors the overlay
+            position-input pattern, just with the full x/y/w/h box. */}
+        <div className="grid grid-cols-2 gap-2">
+          {([
+            ["x", "X"],
+            ["y", "Y"],
+            ["width", "W"],
+            ["height", "H"],
+          ] as Array<["x" | "y" | "width" | "height", string]>).map(([key, label]) => (
+            <div key={key} className="flex items-center gap-2">
+              <label
+                className="w-6 shrink-0 text-xs text-vf-text-secondary"
+                htmlFor={`clip-tf-${key}`}
+              >
+                {label}
+              </label>
+              <input
+                id={`clip-tf-${key}`}
+                type="number"
+                min={0}
+                max={100}
+                step={1}
+                value={Math.round((tf[key] ?? 0) * 100) / 100}
+                aria-label={`Transform ${label}`}
+                onChange={(e) => onTransformChange(key, Number(e.target.value))}
+                className="h-7 w-full rounded-sm border border-vf-border-default bg-vf-surface-2 px-2 text-xs text-vf-text-primary vf-tnum"
+              />
+              <span className="text-2xs text-vf-text-tertiary">%</span>
+            </div>
+          ))}
+        </div>
         <Slider
           label="Opacity"
           value={currentOpacity}
@@ -268,7 +358,8 @@ function VideoClipInspector({ clip }: { clip: Clip }) {
           onChange={(v) => setClipOpacity(clip.id, clip.trackId, v)}
         />
         <p className="text-2xs text-vf-text-tertiary">
-          ⓘ Pan/zoom is via Ken Burns; scale/opacity animate via Keyframes below.
+          ⓘ X/Y/W/H are percent of canvas (same as dragging on the canvas). Pan/zoom is via
+          Ken Burns; scale/opacity animate via Keyframes below.
         </p>
       </Section>
 
