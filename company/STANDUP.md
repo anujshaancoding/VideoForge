@@ -6,6 +6,37 @@ Format per entry: **Shipped · In-flight · Blocked · Decisions needed · Today
 
 ---
 
+### 2026-06-14 — 🆚 Canva end-to-end parity sweep (CEO-requested) — AUDITED + FIRST FIX BATCH SHIPPED
+- **CEO ask:** compare VideoForge to Canva end-to-end (import → drag-to-timeline → every editing feature →
+  export), find the gaps, fix the issues, fill the gaps. Plus 3 gate decisions resolved up front:
+  watermark-free 1080p, aspect-ratio chooser (no default), perf gate = absolute ≥30fps on pinned HW
+  (⚠️ infra-spend follow-up queued for Anchor).
+- **Audit (6 parallel persona auditors, read-only):** ~35 findings across import/timeline/canvas/audio+text/
+  export/product, each classified BUG vs GAP-INSCOPE vs GAP-GATE. Headline: build is more complete than the
+  roadmap implied, but there's a cluster of **preview≠export invariant cracks** (the wedge) + dead `alert()`
+  stubs + the just-decided watermark-free not yet wired.
+- **Shipped (4 disjoint fix bundles, commit `65014d4`):**
+  - **Invariant fixes:** watermark off-by-default (all 3 callers); caption burn-in now emits `force_style`
+    from `CaptionStyle` so export==preview; font picker removed + preview locked to Inter (was 20 fonts in
+    preview, Inter in export); removed clip-rotate handle + text rotation slider (never exported); audio
+    fade in/out mid-clip divergence fixed.
+  - **In-scope gaps filled:** ripple delete + Ctrl/Cmd+Delete (§3.3); track-lock button (orphaned action);
+    copy/paste shortcuts; export-aspect mismatch warning; server fps clamp; unsupported-format rejection
+    (415) + file-size ceilings (413); media-library rename/delete with in-use warning; WS `asset:ready`
+    race fix.
+  - **Hygiene:** removed canvas + timeline + editor `alert()` stub buttons/shortcuts.
+- **Verified:** `pnpm typecheck` green (8/8, fixed 1 regression + pre-existing blockers); package suites
+  green (script-studio snapshot refreshed for the schema `hidden` default); web tests **12 failing =
+  identical to the pre-change baseline → zero new regressions** (the known WIP-red set).
+- **Blocked / follow-ups:** (a) caption+watermark **goldens** need re-baseline when the golden gate (Now #1)
+  is built; (b) ~3 pre-existing-red web tests now assert removed-by-design behavior (watermark disclosure,
+  canvas toolbar) — update when the web-test backlog is cleared.
+- **Decisions needed (queued for CEO):** sequencing of the already-approved big builds (CC0 library /
+  Script Studio v1 / template thumbnails / multi-select) + new GAP-GATEs (versioning/restore, numeric
+  transform inputs, canvas bg/fit, library search). Larger in-scope items still open: keyframe
+  interpolation (§3.7 centerpiece, currently animates nothing), volume envelope UI, resumable upload,
+  canvas alignment snapping.
+
 ### 2026-06-05 — 🎙️ Script Studio blueprint (CEO-requested: text→voice + script→video, $0) — BLUEPRINTED
 - **CEO ask:** add an AI text-to-voice generator + a script→video generator, hard constraint **$0 / no
   purchases**. Atlas clarified scope with the CEO: script→video = **on-wedge AI assembly** (paste script
