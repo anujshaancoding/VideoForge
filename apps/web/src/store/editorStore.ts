@@ -283,6 +283,16 @@ export interface EditorActions {
   setTrackVolume: (trackId: string, volume: number) => void;
   setTrackPan: (trackId: string, pan: number) => void;
 
+  // ── §3.4: Per-track volume-envelope automation (piecewise-linear gain over time) ─
+  /** Replace the whole envelope (points are kept time-sorted; values clamped 0–200). */
+  setVolumeEnvelope: (trackId: string, points: Array<{ timeMs: number; value: number }>) => void;
+  /** Add one point (time-sorted insert). Returns silently if the track is not audio. */
+  addVolumeEnvelopePoint: (trackId: string, timeMs: number, value: number) => void;
+  /** Patch the point at index `index` (time and/or value); re-sorts by time. */
+  updateVolumeEnvelopePoint: (trackId: string, index: number, patch: { timeMs?: number; value?: number }) => void;
+  /** Remove the point at index `index`. */
+  removeVolumeEnvelopePoint: (trackId: string, index: number) => void;
+
   // ── M4: Text overlay ────────────────────────────────────────────────────────
   /** Add a text overlay clip to the overlay track `trackId` at `startOnTimeline` ms. */
   addTextOverlay: (text: string, trackId: string, startOnTimeline: number) => void;
@@ -1442,6 +1452,51 @@ export const useEditorStore = create<EditorStore>()(
           if (track && (track.type === "audio" || track.type === "voiceover")) {
             track.pan = clamp(Math.round(pan), -100, 100);
           }
+        });
+      },
+
+      // ── §3.4: Per-track volume-envelope automation ───────────────────────
+      // Points are {timeMs, value(percent 0–200)} in absolute-timeline ms, kept
+      // time-sorted so the shared sampler (sampleVolumeEnvelope) reads them in
+      // order on BOTH the preview (AudioEngine) and export (buildFilterComplex)
+      // sides. Empty/1-point envelopes fall back to the flat `track.volume`.
+      setVolumeEnvelope: (trackId, points) => {
+        commit((project) => {
+          const track = project.tracks.find((t) => t.id === trackId);
+          if (!track || (track.type !== "audio" && track.type !== "voiceover")) return;
+          track.volumeEnvelope = points
+            .map((p) => ({ timeMs: ms(p.timeMs), value: clamp(Math.round(p.value), 0, 200) }))
+            .sort((a, b) => a.timeMs - b.timeMs);
+        });
+      },
+
+      addVolumeEnvelopePoint: (trackId, timeMs, value) => {
+        commit((project) => {
+          const track = project.tracks.find((t) => t.id === trackId);
+          if (!track || (track.type !== "audio" && track.type !== "voiceover")) return;
+          track.volumeEnvelope.push({ timeMs: ms(timeMs), value: clamp(Math.round(value), 0, 200) });
+          track.volumeEnvelope.sort((a, b) => a.timeMs - b.timeMs);
+        });
+      },
+
+      updateVolumeEnvelopePoint: (trackId, index, patch) => {
+        commit((project) => {
+          const track = project.tracks.find((t) => t.id === trackId);
+          if (!track || (track.type !== "audio" && track.type !== "voiceover")) return;
+          const point = track.volumeEnvelope[index];
+          if (!point) return;
+          if (patch.timeMs !== undefined) point.timeMs = ms(patch.timeMs);
+          if (patch.value !== undefined) point.value = clamp(Math.round(patch.value), 0, 200);
+          track.volumeEnvelope.sort((a, b) => a.timeMs - b.timeMs);
+        });
+      },
+
+      removeVolumeEnvelopePoint: (trackId, index) => {
+        commit((project) => {
+          const track = project.tracks.find((t) => t.id === trackId);
+          if (!track || (track.type !== "audio" && track.type !== "voiceover")) return;
+          if (index < 0 || index >= track.volumeEnvelope.length) return;
+          track.volumeEnvelope.splice(index, 1);
         });
       },
 

@@ -27,6 +27,48 @@ interface TrackChain {
   pan: StereoPannerNode;
 }
 
+/** Volume-envelope point (absolute-timeline ms; value = percent gain 0–200). */
+interface VolumeEnvelopePoint {
+  timeMs: number;
+  value: number;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SHARED volume-envelope sampler (§3.4). MUST stay byte-identical to
+// `sampleVolumeEnvelope` in packages/ffmpeg-graph/buildFilterComplex.ts — that is
+// the canonical export-side twin; this is the preview mirror (the same shared-helper
+// discipline as ColorGrader.eqParams ↔ colorGradeExtOf). Piecewise-LINEAR gain
+// percent at absolute-timeline `timeMs`, clamping to the first/last point at the
+// ends, returning `fallback` (the flat track `volume`) for an empty envelope.
+// `points` MUST be time-sorted (the store keeps volumeEnvelope sorted on author).
+// Preview==export depends on this formula matching the export expression exactly.
+// ─────────────────────────────────────────────────────────────────────────────
+function sampleVolumeEnvelope(
+  points: VolumeEnvelopePoint[],
+  timeMs: number,
+  fallback: number,
+): number {
+  if (points.length === 0) return fallback;
+  if (points.length === 1 || timeMs <= points[0]!.timeMs) return points[0]!.value;
+  const last = points[points.length - 1]!;
+  if (timeMs >= last.timeMs) return last.value;
+  for (let i = 0; i < points.length - 1; i++) {
+    const a = points[i]!;
+    const b = points[i + 1]!;
+    if (timeMs >= a.timeMs && timeMs <= b.timeMs) {
+      const span = b.timeMs - a.timeMs;
+      const u = span > 0 ? (timeMs - a.timeMs) / span : 0;
+      return a.value + (b.value - a.value) * u;
+    }
+  }
+  return last.value;
+}
+
+/** True when the envelope actually automates (≥2 points and not all-equal). */
+function envelopeIsActive(points: VolumeEnvelopePoint[]): boolean {
+  return points.length >= 2 && !points.every((p) => p.value === points[0]!.value);
+}
+
 export class AudioEngine {
   private ctx: AudioContext;
   private masterGain: GainNode;
@@ -117,8 +159,21 @@ export class AudioEngine {
     for (const track of project.tracks) {
       if (!this.isAudioTrack(track)) continue;
       const chain = this.ensureChain(track.id);
-      const targetGain = audible.has(track.id) ? track.volume / 100 : 0;
-      chain.gain.gain.setTargetAtTime(targetGain, now, 0.02);
+      const gate = audible.has(track.id) ? 1 : 0;
+      const env = track.volumeEnvelope as VolumeEnvelopePoint[];
+      if (gate === 1 && this._isPlaying && envelopeIsActive(env)) {
+        // Automated + audible + playing: schedule the piecewise-linear curve along
+        // the master clock so the audible gain follows the points in real time.
+        this._scheduleTrackEnvelope(chain.gain, env, this._currentTimelineMs());
+      } else {
+        // Flat / paused path (no active envelope, muted, or scrubbing while paused):
+        // set the STATIC sampled gain at the current position. Cancel any pending
+        // envelope ramps first so this value wins. For an empty envelope this is
+        // exactly the legacy `track.volume / 100` behaviour (sampler fallback).
+        chain.gain.gain.cancelScheduledValues(now);
+        const flat = gate === 1 ? this._sampleTrackGainMul(env, track.volume, this._currentTimelineMs()) : 0;
+        chain.gain.gain.setTargetAtTime(flat, now, 0.02);
+      }
       chain.pan.pan.setTargetAtTime(track.pan / 100, now, 0.02);
       for (const clip of track.clips) void this.ensureBuffer(clip.sourceAssetId);
     }
@@ -146,12 +201,56 @@ export class AudioEngine {
     const audible = this.audibleTrackIds(this.project);
     for (const track of this.project.tracks) {
       if (!this.isAudioTrack(track) || !audible.has(track.id)) continue;
+      // §3.4: lay the track volume-envelope curve onto the gain node along the clock
+      // BEFORE scheduling clips, so the audible gain follows the points (flat tracks
+      // were already set by updateProject and are left untouched here).
+      const env = track.volumeEnvelope as VolumeEnvelopePoint[];
+      if (envelopeIsActive(env)) this._scheduleTrackEnvelope(this.ensureChain(track.id).gain, env, fromMs);
       for (const clip of track.clips) this._scheduleClip(track.id, clip, fromMs);
     }
   }
 
   private playFromMs = 0;
   private playStartCtxTime = 0;
+
+  /** Current timeline position (ms) from the master clock; playFromMs when paused. */
+  private _currentTimelineMs(): number {
+    if (!this._isPlaying) return this.playFromMs;
+    return this.playFromMs + (this.ctx.currentTime - this.playStartCtxTime) * 1000;
+  }
+
+  /** Track gain multiplier at timeline `timeMs` honouring its envelope (or flat volume). */
+  private _sampleTrackGainMul(env: VolumeEnvelopePoint[], volume: number, timeMs: number): number {
+    return sampleVolumeEnvelope(env, timeMs, volume) / 100;
+  }
+
+  /**
+   * Schedule the piecewise-linear gain curve onto `gainNode` from the timeline
+   * position `fromMs` forward, using setValueAtTime + linearRampToValueAtTime so the
+   * audible gain follows the SAME points the export emits (preview==export). The
+   * curve is seeded at `now` with the exact sampled value, then a ramp is laid to
+   * every envelope point still ahead (and a flat hold at the last point's value).
+   * Maps absolute-timeline ms → ctx time via the master clock.
+   */
+  private _scheduleTrackEnvelope(gainNode: GainNode, points: VolumeEnvelopePoint[], fromMs: number): void {
+    const now = this.ctx.currentTime;
+    // ctx time at which the timeline reaches `tMs` (playStartCtxTime corresponds to playFromMs).
+    const ctxAt = (tMs: number) => this.playStartCtxTime + (tMs - this.playFromMs) / 1000;
+    gainNode.gain.cancelScheduledValues(now);
+    // Seed: exact gain at the start position (clamps before-first / after-last internally).
+    gainNode.gain.setValueAtTime(sampleVolumeEnvelope(points, fromMs, points[0]!.value) / 100, now);
+    // Ramp to each point ahead of `fromMs`; points are time-sorted.
+    for (const p of points) {
+      if (p.timeMs <= fromMs) continue;
+      const when = Math.max(now, ctxAt(p.timeMs));
+      gainNode.gain.linearRampToValueAtTime(p.value / 100, when);
+    }
+    // Hold the last value after the final point (clamp-after-last == constant end).
+    const last = points[points.length - 1]!;
+    if (last.timeMs > fromMs) {
+      gainNode.gain.setValueAtTime(last.value / 100, Math.max(now, ctxAt(last.timeMs)));
+    }
+  }
 
   /** Schedule a single clip relative to the master clock. */
   private _scheduleClip(trackId: string, clip: Clip, fromMs: number): void {

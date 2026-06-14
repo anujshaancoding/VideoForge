@@ -42,6 +42,22 @@ export const assets = pgTable('assets', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 
+// Project versions — immutable snapshots of a project's full §18 document, taken
+// automatically (~every 30 min of active editing) or on an explicit "save version".
+// This is the "never lose your work" trust play: restore loads a snapshot back as
+// the project's current document (via a new revision — history is never destroyed).
+// workspace_id is the authenticated userId (user-is-the-workspace MVP model).
+export const projectVersions = pgTable('project_versions', {
+  id: text('id').primaryKey(),
+  projectId: text('project_id').notNull(),
+  workspaceId: text('workspace_id').notNull(),
+  snapshot: jsonb('snapshot').notNull(),
+  label: text('label'),
+  /** 'auto' (interval snapshot) | 'named' (explicit save version). */
+  kind: text('kind').notNull().default('auto'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
 export const exportJobs = pgTable('export_jobs', {
   id: text('id').primaryKey(),
   projectId: text('project_id').notNull(),

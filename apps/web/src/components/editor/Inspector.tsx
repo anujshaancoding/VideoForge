@@ -580,6 +580,85 @@ function KeyframeRow({
   );
 }
 
+// ── Track volume-envelope editor (§3.4) — piecewise-linear gain over time ─────────
+// Authors the per-track `volumeEnvelope` points (absolute-timeline ms + percent gain).
+// The SAME points drive the preview (AudioEngine) and the export (buildFilterComplex)
+// through the shared sampler, so "what you cut is what you get" for automated volume.
+// Brand: sky-blue (vf-selection) selection/affordances — never amber/purple.
+function VolumeEnvelopeEditor({ track }: { track: Extract<Track, { type: "audio" | "voiceover" }> }) {
+  const addPoint = useEditorStore((s) => s.addVolumeEnvelopePoint);
+  const updatePoint = useEditorStore((s) => s.updateVolumeEnvelopePoint);
+  const removePoint = useEditorStore((s) => s.removeVolumeEnvelopePoint);
+  const playheadMs = useEditorStore((s) => s.playheadMs);
+  const points = track.volumeEnvelope;
+
+  return (
+    <Section
+      title="Volume envelope"
+      action={
+        <button
+          type="button"
+          onClick={() => addPoint(track.id, Math.round(playheadMs), track.volume)}
+          className="flex h-6 items-center gap-0.5 rounded-sm px-1.5 text-2xs text-vf-text-tertiary hover:bg-vf-surface-3 hover:text-vf-selection"
+          title="Add a point at the playhead"
+        >
+          + Point
+        </button>
+      }
+    >
+      {points.length === 0 ? (
+        <p className="text-2xs text-vf-text-tertiary">
+          No automation — track volume ({track.volume}%) applies flat. Add points to fade volume over time.
+        </p>
+      ) : (
+        <div className="flex flex-col gap-1">
+          {points.map((p, i) => (
+            <div key={i} className="flex items-center gap-1.5 rounded-sm border border-vf-border-subtle px-1.5 py-1">
+              <span className="text-2xs text-vf-selection tabular-nums" aria-hidden="true">◆</span>
+              <label className="flex items-center gap-1 text-2xs text-vf-text-tertiary">
+                t
+                <input
+                  type="number"
+                  min={0}
+                  step={100}
+                  value={p.timeMs}
+                  onChange={(e) => updatePoint(track.id, i, { timeMs: Number(e.target.value) })}
+                  className="w-16 rounded-sm bg-vf-surface-sunken px-1 py-0.5 text-2xs text-vf-text-primary tabular-nums outline-none focus-visible:outline focus-visible:outline-1 focus-visible:outline-vf-selection"
+                  aria-label={`Point ${i + 1} time in ms`}
+                />
+                ms
+              </label>
+              <label className="ml-auto flex items-center gap-1 text-2xs text-vf-text-tertiary">
+                <input
+                  type="number"
+                  min={0}
+                  max={200}
+                  step={1}
+                  value={p.value}
+                  onChange={(e) => updatePoint(track.id, i, { value: Number(e.target.value) })}
+                  className="w-14 rounded-sm bg-vf-surface-sunken px-1 py-0.5 text-2xs text-vf-text-primary tabular-nums outline-none focus-visible:outline focus-visible:outline-1 focus-visible:outline-vf-selection"
+                  aria-label={`Point ${i + 1} gain percent`}
+                />
+                %
+              </label>
+              <button
+                type="button"
+                onClick={() => removePoint(track.id, i)}
+                className="rounded-sm p-0.5 text-vf-text-tertiary hover:bg-vf-surface-3 hover:text-vf-text-primary"
+                title="Remove point"
+                aria-label={`Remove point ${i + 1}`}
+              >
+                <Trash2 className="h-3 w-3" aria-hidden="true" />
+              </button>
+            </div>
+          ))}
+          <p className="text-2xs text-vf-text-tertiary">ⓘ Gain ramps linearly between points; renders identically in preview and export.</p>
+        </div>
+      )}
+    </Section>
+  );
+}
+
 // ── Audio clip inspector (volume / pan / fades) — fully wired ─────────────────────
 function AudioInspector({ clip, track }: { clip: Clip; track: Track | null }) {
   const setClipGain = useEditorStore((s) => s.setClipGain);
@@ -642,6 +721,9 @@ function AudioInspector({ clip, track }: { clip: Clip; track: Track | null }) {
             onChange={(v) => setTrackPan(track.id, v)}
           />
         </Section>
+      )}
+      {track && (track.type === "audio" || track.type === "voiceover") && (
+        <VolumeEnvelopeEditor track={track} />
       )}
       <p className="text-2xs text-vf-text-tertiary">ⓘ Fades + gain/pan render identically in preview and export.</p>
     </>
@@ -708,6 +790,10 @@ function TrackInspector({ trackId, project }: { trackId: string | null; project:
             </>
           )}
         </Section>
+
+        {isAudioTrack && (track.type === "audio" || track.type === "voiceover") && (
+          <VolumeEnvelopeEditor track={track} />
+        )}
 
         <p className="text-2xs text-vf-text-tertiary">
           {isAudioTrack

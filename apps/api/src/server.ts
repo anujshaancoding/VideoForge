@@ -34,6 +34,7 @@ import { projectRoutes } from './routes/projects.js';
 import { assetRoutes } from './routes/assets.js';
 import { exportRoutes } from './routes/exports.js';
 import { authRoutes } from './routes/auth.js';
+import { versionRoutes } from './routes/versions.js';
 import { registerAuthDecorator, resolveJwtSecret } from './auth/plugin.js';
 import { registerWs, broadcast } from './ws.js';
 import { redisClient } from './queues.js';
@@ -149,6 +150,10 @@ export async function buildServer(): Promise<FastifyInstance> {
 
   await app.register(authRoutes, { prefix: `${API_PREFIX}/auth` });
   await app.register(projectRoutes, { prefix: `${API_PREFIX}/projects` });
+  // Project version history (snapshots/restore). Same /projects prefix so paths are
+  // /api/v1/projects/:projectId/versions[/...]. Registered as its own plugin so it
+  // owns its routes without touching projectRoutes (sibling-owned file).
+  await app.register(versionRoutes, { prefix: `${API_PREFIX}/projects` });
   await app.register(assetRoutes, { prefix: `${API_PREFIX}/assets` });
   await app.register(exportRoutes, { prefix: `${API_PREFIX}/exports` });
 

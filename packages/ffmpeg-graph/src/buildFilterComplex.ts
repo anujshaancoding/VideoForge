@@ -274,6 +274,112 @@ function gainMul(percent: number): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Track volume-envelope (§3.4) — the SHARED piecewise-linear gain automation.
+//
+// THE INVARIANT (CLAUDE.md): preview audio mix == export audio mix. The track
+// gain over time is a piecewise-LINEAR curve through `volumeEnvelope` points
+// (`{timeMs, value}`, value = percent 0–200, 100 = 0 dB) in ABSOLUTE-timeline ms.
+//
+// `sampleVolumeEnvelope` is the ONE canonical sampler (exported so it is a single,
+// unit-testable source of truth); AudioEngine mirrors it VERBATIM (the same shared-
+// helper discipline as `eqParams`/`colorGradeExtOf` and `sampleNumericKeyframes`).
+// The EXPORT cannot sample per frame in a pure builder, so it emits the ALGEBRAIC
+// TWIN as a `t`-driven ffmpeg `volume='…':eval=frame` expression (`volumeEnvelopeExpr`).
+// After §6's per-clip `adelay`, the track stream sits on the absolute timeline, so
+// the filter's frame-time variable `t` (seconds) IS absolute-timeline seconds — no
+// offset, unlike the per-clip opacity `geq` path.
+//
+// BACKWARD-COMPAT: 0 points (or 1 point, or all-equal) ⇒ a single constant gain
+// (the flat `volume=` path / `track.volume`), byte-identical to the previous graph,
+// so non-automated tracks' filtergraphs do not move (no golden/snapshot churn).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** One volume-envelope point in absolute-timeline ms; value = percent gain 0–200. */
+export interface VolumeEnvelopePoint {
+  timeMs: number;
+  value: number;
+}
+
+/** Time-sorted copy of the envelope (the authoring order is not guaranteed sorted). */
+function sortedEnvelope(points: VolumeEnvelopePoint[]): VolumeEnvelopePoint[] {
+  return [...points].sort((a, b) => a.timeMs - b.timeMs);
+}
+
+/**
+ * SHARED sampler — track gain PERCENT at absolute-timeline `timeMs`, piecewise-linear
+ * through the (assumed time-sorted) envelope points. Clamps to the first/last point
+ * before/after the envelope (constant ends). Returns `fallback` (the flat track
+ * `volume`) when the envelope has 0 points. MUST stay byte-identical to
+ * AudioEngine.sampleVolumeEnvelope so preview gain == export gain.
+ */
+export function sampleVolumeEnvelope(
+  points: VolumeEnvelopePoint[],
+  timeMs: number,
+  fallback: number,
+): number {
+  if (points.length === 0) return fallback;
+  if (points.length === 1 || timeMs <= points[0]!.timeMs) return points[0]!.value;
+  const last = points[points.length - 1]!;
+  if (timeMs >= last.timeMs) return last.value;
+  for (let i = 0; i < points.length - 1; i++) {
+    const a = points[i]!;
+    const b = points[i + 1]!;
+    if (timeMs >= a.timeMs && timeMs <= b.timeMs) {
+      const span = b.timeMs - a.timeMs;
+      const u = span > 0 ? (timeMs - a.timeMs) / span : 0;
+      return a.value + (b.value - a.value) * u;
+    }
+  }
+  return last.value;
+}
+
+/**
+ * Export half of the envelope: either a CONSTANT gain multiplier (0/1 point or all
+ * values equal → byte-compatible flat `volume=`) or a time-varying ffmpeg `volume`
+ * value expression that reproduces the SAME piecewise-linear curve as the sampler,
+ * driven by the frame-time variable `t` (absolute-timeline seconds after §6 adelay).
+ *
+ * `{ kind:"const", percent }` → caller emits `volume=<gainMul(percent)>` (or nothing
+ *   when percent == 100); carrying the raw PERCENT (not a /100 roundtrip) keeps the
+ *   flat path byte-identical to the legacy `gainMul(at.volume)` output.
+ * `{ kind:"expr", expr }` → caller emits `volume='<expr>':eval=frame`. The expression
+ * is the algebraic twin of `sampleVolumeEnvelope`, normalised to a multiplier (/100).
+ */
+function volumeEnvelopeExpr(
+  points: VolumeEnvelopePoint[],
+  fallbackPercent: number,
+): { kind: "const"; percent: number } | { kind: "expr"; expr: string } {
+  const pts = sortedEnvelope(points);
+  if (pts.length === 0) return { kind: "const", percent: fallbackPercent };
+  const allEqual = pts.every((p) => p.value === pts[0]!.value);
+  if (pts.length === 1 || allEqual) return { kind: "const", percent: pts[0]!.value };
+
+  // Build a nested if() over segments in absolute-timeline seconds, multiplier units.
+  const firstMul = pts[0]!.value / 100;
+  const lastMul = pts[pts.length - 1]!.value / 100;
+  let expr = `${num4(lastMul)}`; // gain at/after the last point
+  for (let i = pts.length - 2; i >= 0; i--) {
+    const a = pts[i]!;
+    const b = pts[i + 1]!;
+    const aSec = a.timeMs / 1000;
+    const bSec = b.timeMs / 1000;
+    const span = bSec - aSec;
+    const aMul = a.value / 100;
+    const bMul = b.value / 100;
+    const d = bMul - aMul;
+    // Linear within the segment; clip(u,0,1) guards float boundary error. Commas live
+    // inside the expression evaluator (the whole thing is single-quoted in the graph).
+    const seg = span > 0
+      ? `(${num4(aMul)}+(${num4(d)})*clip((t-${num4(aSec)})/${num4(span)},0,1))`
+      : `${num4(aMul)}`;
+    expr = `if(lt(t,${num4(bSec)}),${seg},${expr})`;
+  }
+  // Clamp before the first point to the first value.
+  expr = `if(lt(t,${num4(pts[0]!.timeMs / 1000)}),${num4(firstMul)},${expr})`;
+  return { kind: "expr", expr };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Output-duration bound — the catastrophic-runaway fix.
 //
 // The composite base is a SYNTHETIC `color=` lavfi source (§3 below). FFmpeg's
@@ -949,8 +1055,18 @@ export function buildExportCommand(project: Project, settings: ExportSettings): 
     }
 
     // Track chain: volume → pan (§10.3 per-track chain order). volume percent 0–200.
+    // The volume step honours the §3.4 envelope: an automated track emits a time-
+    // varying `volume='…':eval=frame` (the algebraic twin of the preview sampler);
+    // a non-automated track (empty/1-point/all-equal envelope) emits the flat
+    // `volume=<mul>` exactly as before (byte-identical → no graph churn).
     const trackSteps: string[] = [];
-    if (at.volume !== 100) trackSteps.push(`volume=${gainMul(at.volume)}`);
+    const env = volumeEnvelopeExpr(at.volumeEnvelope, at.volume);
+    if (env.kind === "expr") {
+      trackSteps.push(`volume='${env.expr}':eval=frame`);
+    } else if (env.percent !== 100) {
+      // Flat path: same `gainMul(percent)` string as before — byte-identical to legacy.
+      trackSteps.push(`volume=${gainMul(env.percent)}`);
+    }
     if (at.pan !== 0) trackSteps.push(panExpr(at.pan));
     const aLabel = `aT${aCounter++}`;
     if (trackSteps.length > 0) {

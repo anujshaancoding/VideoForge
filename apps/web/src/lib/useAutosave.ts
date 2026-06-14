@@ -16,7 +16,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Project } from '@videoforge/project-schema';
 import { useEditorStore } from '../store/editorStore.js';
-import { hasSession } from './api.js';
+import { hasSession, apiCreateVersion } from './api.js';
 import { saveProject } from './projectStore.js';
 
 export type SaveStatus = 'saved' | 'saving' | 'unsaved' | 'error';
@@ -24,6 +24,13 @@ export type SaveStatus = 'saved' | 'saving' | 'unsaved' | 'error';
 const DEBOUNCE_MS = 3000;
 /** How long to wait before re-attempting a save deferred by a transient auth race. */
 const SESSION_RETRY_MS = 400;
+/**
+ * Auto-versioning cadence: snapshot a version every 30 min of active editing.
+ * A SINGLE bounded interval (cleared on unmount) — never an unbounded loop/timer
+ * (memory rule). The tick is cheap and a no-op unless the doc actually changed
+ * since the last version, so an idle editor never spams the version table.
+ */
+const AUTO_VERSION_MS = 30 * 60 * 1000;
 
 // ── Arming signal ───────────────────────────────────────────────────────────────
 // The editor route calls armAutosave(id) once it has hydrated the store from the
@@ -39,6 +46,29 @@ export function armAutosave(projectId: string): void {
 /** Disarm autosave (call on editor unmount so a stale id can't be saved later). */
 export function disarmAutosave(): void {
   armedProjectId = null;
+}
+
+// ── Version-list change signal ──────────────────────────────────────────────────
+// Fired whenever a new version is created (auto-version tick, or a manual save from
+// the panel). The VersionsPanel subscribes so its list refreshes without polling.
+type VersionsChangedListener = () => void;
+const versionsChangedListeners = new Set<VersionsChangedListener>();
+
+/** Subscribe to "a version was created" — returns an unsubscribe. */
+export function onVersionsChanged(listener: VersionsChangedListener): () => void {
+  versionsChangedListeners.add(listener);
+  return () => versionsChangedListeners.delete(listener);
+}
+
+/** Notify subscribers that the version list changed (call after creating one). */
+export function emitVersionsChanged(): void {
+  for (const l of versionsChangedListeners) {
+    try {
+      l();
+    } catch {
+      // a listener throwing must not break the caller that created the version
+    }
+  }
 }
 
 // ── Imperative immediate-save (Ctrl/Cmd+S) ──────────────────────────────────────
@@ -162,6 +192,33 @@ export function useAutosave(): SaveStatus {
       if (timerRef.current) clearTimeout(timerRef.current);
     };
   }, [triggerSave]);
+
+  // Auto-versioning: ONE bounded 30-min interval (cleared on unmount). Each tick is
+  // a no-op unless (a) the project is armed (loaded from server), (b) we hold a live
+  // session, and (c) the document changed since the last snapshot — so an idle or
+  // unchanged editor never spams the version table. A failed snapshot is swallowed:
+  // it must never disrupt the (separate) document autosave.
+  const lastVersionedRef = useRef<Project | null>(null);
+  useEffect(() => {
+    const tick = () => {
+      const { project } = useEditorStore.getState();
+      if (armedProjectId == null || project.id !== armedProjectId) return;
+      if (!hasSession()) return;
+      // Skip when nothing has changed since the last auto-version (revision-only
+      // bumps from document autosave count as no change — same test as edits).
+      const prev = lastVersionedRef.current;
+      if (prev && prev.id === project.id && isRevisionOnlyChange(prev, project)) return;
+      lastVersionedRef.current = project;
+      void apiCreateVersion(project.id, { kind: 'auto', document: project })
+        .then(() => emitVersionsChanged())
+        .catch(() => {
+          // Network/server failure — let the next tick try again with fresh state.
+          lastVersionedRef.current = prev;
+        });
+    };
+    const interval = setInterval(tick, AUTO_VERSION_MS);
+    return () => clearInterval(interval);
+  }, []);
 
   // Flush a pending save when the page is being hidden/unloaded so the last edits
   // (still inside the debounce window) are not lost on reload/close. We fire on

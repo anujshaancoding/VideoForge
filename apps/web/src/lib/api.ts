@@ -261,6 +261,55 @@ export async function apiDuplicateProject(id: string): Promise<ApiProject> {
   return request<ApiProject>(`/projects/${id}/duplicate`, { method: 'POST' });
 }
 
+// ── Project version history ("never lose your work") ────────────────────────────
+
+export type ProjectVersionKind = 'auto' | 'named';
+
+/** Version list-item metadata (no snapshot payload — kept lightweight). */
+export interface ProjectVersionSummary {
+  id: string;
+  label: string | null;
+  kind: ProjectVersionKind;
+  createdAt: string;
+}
+
+/**
+ * Snapshot a version of a project. With `document`, the supplied doc is snapshotted
+ * (validated server-side); without it, the project's current stored doc is used.
+ * `kind` defaults to 'auto' on the server; pass 'named' (with a `label`) for an
+ * explicit "save version".
+ */
+export async function apiCreateVersion(
+  projectId: string,
+  body: { label?: string; kind?: ProjectVersionKind; document?: unknown } = {},
+): Promise<ProjectVersionSummary> {
+  return request<ProjectVersionSummary>(`/projects/${projectId}/versions`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+/** List a project's versions, newest first (server caps to the latest 50). */
+export async function apiListVersions(projectId: string): Promise<ProjectVersionSummary[]> {
+  const res = await request<{ items: ProjectVersionSummary[] }>(`/projects/${projectId}/versions`);
+  return res.items;
+}
+
+/**
+ * Restore a version: the server loads its snapshot back as the project's current
+ * document (advancing the revision, preserving history) and returns the full
+ * restored `Project` document so the caller can hand it straight to the editor.
+ */
+export async function apiRestoreVersion(
+  projectId: string,
+  versionId: string,
+): Promise<{ revision: number; document: unknown }> {
+  return request<{ revision: number; document: unknown }>(
+    `/projects/${projectId}/versions/${versionId}/restore`,
+    { method: 'POST' },
+  );
+}
+
 // ── Accepted formats + size ceilings (MVP §3.1) ─────────────────────────────────
 // Single decode path: MP4/MOV (H.264), MP3/WAV/AAC, JPG/PNG only. Everything else
 // (H.265/MKV/AVI/…) is rejected up-front rather than presigned + uploaded then
