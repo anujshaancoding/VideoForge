@@ -234,6 +234,7 @@ function VideoClipInspector({ clip }: { clip: Clip }) {
   const setClipColorGrade = useEditorStore((s) => s.setClipColorGrade);
   const setClipOpacity = useEditorStore((s) => s.setClipOpacity);
   const setClipTransform = useEditorStore((s) => s.setClipTransform);
+  const setClipFit = useEditorStore((s) => s.setClipFit);
   const setClipSpeed = useEditorStore((s) => s.setClipSpeed);
   const addKeyframe = useEditorStore((s) => s.addKeyframe);
   const removeKeyframe = useEditorStore((s) => s.removeKeyframe);
@@ -357,6 +358,44 @@ function VideoClipInspector({ clip }: { clip: Clip }) {
           valueLabel={`${currentOpacity}%`}
           onChange={(v) => setClipOpacity(clip.id, clip.trackId, v)}
         />
+        {/* FIT — how the source fills the box (logos / PiP / image stickers). Only shown
+            when the clip is on a box (has a transform); a full-frame clip already aspect-
+            fits. Every option is reproduced identically in preview + export (clipFitRects /
+            clipFitScaleSteps), so we never expose a mode the export can't match (R: the
+            overriding rule). "fill" = stretch; "contain" = fit inside (letterbox, no crop);
+            "cover" = fill + crop. */}
+        {clip.transform && (
+          <div className="mt-1">
+            <span className="mb-1 block text-xs text-vf-text-secondary">Fit</span>
+            <div role="group" aria-label="Image fit" className="flex gap-1.5">
+              {([
+                ["fill", "Fill", "Stretch to the box (may distort)"],
+                ["contain", "Fit", "Fit inside the box (letterbox, no crop)"],
+                ["cover", "Crop", "Fill the box and crop the overflow"],
+              ] as Array<["fill" | "contain" | "cover", string, string]>).map(([val, label, hint]) => {
+                const active = (clip.fit ?? "fill") === val;
+                return (
+                  <button
+                    key={val}
+                    type="button"
+                    title={hint}
+                    aria-pressed={active}
+                    data-testid={`clip-fit-${val}`}
+                    onClick={() => setClipFit(clip.id, clip.trackId, val)}
+                    className={cx(
+                      "flex-1 rounded-sm border px-2 py-1 text-2xs font-medium transition-colors",
+                      active
+                        ? "border-vf-selection bg-vf-selection/15 text-vf-text-primary"
+                        : "border-vf-border-default bg-vf-surface-2 text-vf-text-secondary hover:border-vf-border-strong hover:text-vf-text-primary",
+                    )}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
         <p className="text-2xs text-vf-text-tertiary">
           ⓘ X/Y/W/H are percent of canvas (same as dragging on the canvas). Pan/zoom is via
           Ken Burns; scale/opacity animate via Keyframes below.

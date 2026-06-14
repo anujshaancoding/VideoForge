@@ -226,8 +226,28 @@ export interface Clip {
   /** Mirror the clip vertically (FFmpeg `vflip`). */
   flipV?: boolean;
 
+  /**
+   * How the clip's source pixels fill its `transform` box (logos / picture-in-picture /
+   * image stickers). ABSENT ⇒ "fill" (stretch source to the box), which is the historical
+   * default so existing projects/exports stay byte-identical. The preview canvas and the
+   * FFmpeg export BOTH honour this via the SHARED `clipFitRects` geometry, so a fitted
+   * image looks the same in the export — the WYCIWYG invariant holds. Only meaningful
+   * when `transform` is set (a full-frame clip already aspect-fits + pads).
+   */
+  fit?: ClipFit;
+
   // NOTE: transitions live in Project.transitions[], NOT here (finding E-6).
 }
+
+/**
+ * How a clip's source fills its transform box:
+ *   • "fill"    — stretch the source to exactly the box (may distort). Default.
+ *   • "contain" — scale to fit INSIDE the box preserving aspect; letterbox the
+ *                 remainder with the canvas background (no crop).
+ *   • "cover"   — scale to FILL the box preserving aspect; crop the overflow (no bars).
+ * All three modes are reproduced identically in preview (canvas) and export (FFmpeg).
+ */
+export type ClipFit = "fill" | "contain" | "cover";
 
 /**
  * Per-clip canvas transform (PiP). All values are PERCENT of the canvas (0–100 for

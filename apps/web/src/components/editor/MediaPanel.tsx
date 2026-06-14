@@ -532,6 +532,20 @@ export default function MediaPanel() {
       }
     }
 
+    // Images add as a positioned, sized on-canvas element (logo / picture-in-picture /
+    // image sticker): a new TOP video track with a centred 50%-size transform box. The
+    // user can then move/resize it (canvas drag or the Inspector X/Y/W/H fields) and pick
+    // its Fit (Fill/Fit/Crop). This path exports frame-identically (the clip pipeline
+    // honours transform + fit + opacity), so it stays WYCIWYG. (Full-frame backgrounds are
+    // still reachable by setting W/H to 100 in the Inspector.)
+    if (asset.kind === 'image') {
+      let durationMs = getAssetMeta(asset.id)?.durationMs ?? undefined;
+      if (!durationMs) durationMs = 5000; // F10: images default 5s
+      const atMs = useEditorStore.getState().playheadMs;
+      useEditorStore.getState().addClipToCanvas(asset.id, atMs, durationMs);
+      return;
+    }
+
     // Normal (non-template or all slots filled) path: add as a new clip on a suitable track.
     let track = defaultTrackFor(asset.kind, tracks);
     if (!track) {
@@ -541,8 +555,9 @@ export default function MediaPanel() {
       track = defaultTrackFor(asset.kind, useEditorStore.getState().project.tracks);
     }
     if (!track) return;
-    let durationMs = getAssetMeta(asset.id)?.durationMs ?? undefined;
-    if (asset.kind === 'image' && !durationMs) durationMs = 5000; // F10: images default 5s
+    // Images already returned above (added as an on-canvas element); only video/audio
+    // reach here, so no image-duration default is needed.
+    const durationMs = getAssetMeta(asset.id)?.durationMs ?? undefined;
     // Append AFTER the track's existing content so clips never overlap (the user
     // wants to add "at the end"); if the playhead is already past the content,
     // drop it there instead so a deliberate gap is honoured.

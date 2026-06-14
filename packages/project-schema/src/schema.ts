@@ -125,6 +125,8 @@ export const ClipSchema = z
     transform: ClipTransformSchema.optional(),
     flipH: z.boolean().optional(),
     flipV: z.boolean().optional(),
+    // How the source fills the transform box (logos / PiP / image stickers). Absent ⇒ "fill".
+    fit: z.enum(["fill", "contain", "cover"]).optional(),
   })
   .strict();
 

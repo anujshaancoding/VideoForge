@@ -142,6 +142,39 @@ describe("buildExportCommand — per-clip transform (PiP) export parity", () => 
     expect(filterComplex).toContain("hflip");
     expect(filterComplex).toContain("vflip");
   });
+
+  // ── FIT (logos / PiP / image stickers) — preview == export via clipFitScaleSteps ──
+  function withFitOnFirstClip(fit: "fill" | "contain" | "cover" | undefined): string {
+    const p = withFirstClipTransform({ x: 25, y: 25, width: 50, height: 50 }); // → 540×960 box
+    const vt = p.tracks.find((t) => t.type === "video");
+    if (vt && vt.type === "video") {
+      if (fit) vt.clips[0]!.fit = fit;
+      else delete (vt.clips[0] as { fit?: string }).fit;
+    }
+    return buildExportCommand(p, burnSettings).filterComplex;
+  }
+
+  it("fill (default / absent) is a bare scale=box — byte-identical to the pre-fit graph", () => {
+    expect(withFitOnFirstClip(undefined)).toContain("scale=540:960,setsar=1");
+    expect(withFitOnFirstClip("fill")).toContain("scale=540:960,setsar=1");
+  });
+
+  it("contain scales-to-fit + pads with a TRANSPARENT letterbox on rgba", () => {
+    const fc = withFitOnFirstClip("contain");
+    expect(fc).toContain("format=rgba,scale=540:960:force_original_aspect_ratio=decrease");
+    expect(fc).toContain("pad=540:960:(ow-iw)/2:(oh-ih)/2:color=#00000000");
+  });
+
+  it("cover scales-to-fill + crops to the exact box", () => {
+    const fc = withFitOnFirstClip("cover");
+    expect(fc).toContain("scale=540:960:force_original_aspect_ratio=increase,crop=540:960");
+  });
+
+  it("every fit mode still overlays the box at its computed position (placement unchanged)", () => {
+    for (const fit of ["fill", "contain", "cover"] as const) {
+      expect(withFitOnFirstClip(fit)).toMatch(/overlay=270:480:enable=/);
+    }
+  });
 });
 
 describe("buildExportCommand — audio mix (amix normalize=0 + alimiter, §10.3 D-6)", () => {

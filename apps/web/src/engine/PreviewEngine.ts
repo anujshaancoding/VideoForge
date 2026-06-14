@@ -27,7 +27,7 @@ import type { Clip, Project, TextOverlay, ImageOverlay, Keyframe } from "@videof
 // Shared text-overlay layout — the ONE percent→pixel/size/floor/outline-scale formula
 // the FFmpeg export also consumes, so preview geometry == export drawtext (§7.5).
 // `weightToInterFile` is export-only; preview keeps the CSS `Inter` family.
-import { layoutTextOverlay, weightToInterFace, underlineRule, DEFAULT_LINE_HEIGHT } from "@videoforge/project-schema";
+import { layoutTextOverlay, weightToInterFace, underlineRule, DEFAULT_LINE_HEIGHT, clipFitRects } from "@videoforge/project-schema";
 
 /**
  * CSS numeric weight of the bundled Inter face a numeric weight buckets into.
@@ -437,10 +437,34 @@ export class PreviewEngine {
     }
 
     try {
+      // Intrinsic source dimensions BEFORE any grading — needed for FIT (contain/cover)
+      // so the preview reproduces the export's aspect-preserving scale/pad/crop. Images
+      // expose naturalWidth/Height; videos videoWidth/Height. Fall back to the box so a
+      // not-yet-measured source degrades to "fill" (matching clipFitRects' guard).
+      const d = drawable as {
+        naturalWidth?: number;
+        naturalHeight?: number;
+        videoWidth?: number;
+        videoHeight?: number;
+        width?: number;
+        height?: number;
+      };
+      let srcW = d.naturalWidth || d.videoWidth || d.width || 0;
+      let srcH = d.naturalHeight || d.videoHeight || d.height || 0;
+
       if (clip.colorGrade && this.grader) {
-        // Offscreen WebGL `eq`-equivalent pass → parity with the FFmpeg export.
-        const graded = this.grader.apply(drawable, w, h, clip.colorGrade);
-        if (graded) drawable = graded;
+        // Offscreen WebGL `eq`-equivalent pass → parity with the FFmpeg export. Grade at
+        // the SOURCE dims (not the canvas) so the graded canvas preserves the source's
+        // aspect — otherwise FIT math (which needs true source AR) would be wrong. The
+        // FFmpeg export likewise applies `eq` BEFORE the fit scale, so the order matches.
+        const gw = srcW > 0 ? srcW : w;
+        const gh = srcH > 0 ? srcH : h;
+        const graded = this.grader.apply(drawable, gw, gh, clip.colorGrade);
+        if (graded) {
+          drawable = graded;
+          srcW = gw;
+          srcH = gh;
+        }
       }
       // Per-clip opacity: interpolated across the 'opacity' keyframes at the current
       // playhead (matches the export's keyframe curve — §3.7 / preview==export). With
@@ -470,7 +494,17 @@ export class PreviewEngine {
         ctx.scale(clip.flipH ? -1 : 1, clip.flipV ? -1 : 1);
         ctx.translate(-mx, -my);
       }
-      ctx.drawImage(drawable, sx, sy, sw, sh);
+      // FIT: only the transform (box) path honours fit — a full-frame clip keeps the
+      // historical aspect-fit behaviour. The SHARED `clipFitRects` returns the SAME
+      // scale/pad/crop geometry the export's `clipFitScaleSteps` emits, so preview ==
+      // export. `sx..sh` is the (Ken-Burns-adjusted) destination box. "fill" / no source
+      // dims falls back to the prior whole-source-into-box stretch (byte-identical).
+      if (tf && (clip.fit === "contain" || clip.fit === "cover")) {
+        const r = clipFitRects(clip.fit, { x: sx, y: sy, w: sw, h: sh }, srcW, srcH);
+        ctx.drawImage(drawable, r.sx, r.sy, r.sw, r.sh, r.dx, r.dy, r.dw, r.dh);
+      } else {
+        ctx.drawImage(drawable, sx, sy, sw, sh);
+      }
       ctx.restore();
       ctx.globalAlpha = prevAlpha;
     } catch {

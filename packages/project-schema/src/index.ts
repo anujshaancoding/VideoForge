@@ -31,6 +31,12 @@ export {
 } from "./textOverlayLayout.js";
 export type { TextLayout, InterFace, UnderlineRule } from "./textOverlayLayout.js";
 
+// Shared clip-FIT geometry — the ONE scale/pad/crop math the preview canvas and the
+// FFmpeg export both consume so a fitted logo / PiP / image looks identical in both
+// (CLAUDE.md preview == export). `clipFitRects` is the preview half (canvas drawImage
+// rects); `clipFitScaleSteps` is the export half (FFmpeg filter steps).
+export { clipFitRects, clipFitScaleSteps, normalizeClipFit } from "./clipFit.js";
+
 /**
  * Current project schema version. Incremented only on breaking schema changes;
  * the server migrates older documents on open (§18.3). New documents are stamped

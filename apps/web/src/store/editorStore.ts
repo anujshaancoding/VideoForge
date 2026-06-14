@@ -40,6 +40,7 @@ import {
   type ColorGrade,
   type KenBurns,
   type ClipTransform,
+  type ClipFit,
 } from "@videoforge/project-schema";
 import {
   canRedo as historyCanRedo,
@@ -262,6 +263,13 @@ export interface EditorActions {
   setClipTransform: (clipId: string, trackId: string, transform: ClipTransform | undefined) => void;
   /** Mirror a clip horizontally/vertically (export hflip/vflip). */
   setClipFlip: (clipId: string, trackId: string, axis: "h" | "v", value: boolean) => void;
+  /**
+   * Set a clip's FIT mode (how its source fills the transform box) — logos / PiP /
+   * image stickers. "fill" is stored as absent (the byte-identical default). The
+   * preview canvas and the FFmpeg export both honour `clip.fit` via the SHARED
+   * clipFitRects / clipFitScaleSteps geometry, so the result is WYCIWYG.
+   */
+  setClipFit: (clipId: string, trackId: string, fit: ClipFit) => void;
   /** Re-order a clip's video track in the z-stack (forward = on top). */
   moveClipLayer: (clipId: string, dir: "forward" | "backward") => void;
   /** Detach a clip from its A/V link partner so video + audio move/trim independently. */
@@ -1380,6 +1388,18 @@ export const useEditorStore = create<EditorStore>()(
           if (!found) return;
           if (axis === "h") found.clip.flipH = value;
           else found.clip.flipV = value;
+        });
+      },
+
+      setClipFit: (clipId, trackId, fit) => {
+        commit((project) => {
+          const found = findClipInTrack(project, clipId, trackId);
+          if (!found) return;
+          // "fill" is the schema default — store it as ABSENT so existing projects/exports
+          // stay byte-identical and the JSON stays minimal. The preview + export both treat
+          // an absent `fit` as "fill" (clipFitRects / clipFitScaleSteps normalise it).
+          if (fit === "contain" || fit === "cover") found.clip.fit = fit;
+          else delete found.clip.fit;
         });
       },
 

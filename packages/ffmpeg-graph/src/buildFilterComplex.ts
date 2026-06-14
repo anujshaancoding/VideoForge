@@ -57,6 +57,7 @@ import {
   weightToInterFile,
   underlineRule,
   DEFAULT_LINE_HEIGHT,
+  clipFitScaleSteps,
 } from "@videoforge/project-schema";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -823,7 +824,14 @@ export function buildExportCommand(project: Project, settings: ExportSettings): 
       const bg = project.canvas.backgroundColor.replace("#", "0x");
       const box = clipBox(clip, outW, outH);
       if (box) {
-        steps.push(`scale=${box.w}:${box.h}`, "setsar=1");
+        // FIT (logos / PiP / image stickers): the SHARED `clipFitScaleSteps` emits the
+        // scale/pad/crop chain that fills the box for the clip's fit mode. Each mode
+        // outputs EXACTLY box.w×box.h, so the §3 overlay-at-box-position is unchanged.
+        // The preview's `clipFitRects` reproduces the SAME geometry, so preview == export.
+        // Absent/`"fill"` ⇒ a single `scale=box.w:box.h` — byte-identical to the prior graph.
+        // (contain pads with TRANSPARENT, not bg, so the letterbox reveals what's under the
+        // clip exactly as the preview canvas does — see clipFitScaleSteps.)
+        steps.push(...clipFitScaleSteps(clip.fit, box.w, box.h), "setsar=1");
       } else {
         steps.push(
           `scale=${outW}:${outH}:force_original_aspect_ratio=decrease`,
