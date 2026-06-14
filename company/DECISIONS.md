@@ -22,7 +22,20 @@ Gate types: 💰 money · 🧭 scope · 🚀 release/publish · ⚠️ irreversi
 - **Atlas recommends:** ship the engineering scaffold + generated zero-risk seed now (no gate); have Scout
   curate a small bundled CC0 set + Ward vet licenses as a parallel track before this is exposed at launch.
   Bundle-in-repo over hotlinking.
-- **Decision:** ⏳ pending (does NOT block the scaffold build)
+- **2026-06-14 CEO greenlit** Scout-source + Ward-vet. **⚠️ Scout+Ward finding (corrects this entry):**
+  **Pexels / Pixabay / Mixkit / Coverr are NOT CC0** and their licenses **forbid redistributing/bundling**
+  their content as our own library (verified: pexels.com/license — "don't redistribute… on other stock
+  platforms"; Pixabay — no redistribution + API cache-24h/no-hotlink). **Bundle-safe = true CC0/PD only:**
+  Wikimedia Commons (CC0/PDM, per-file verified), Internet Archive (CC0 items), Library of Congress NSR
+  (US-gov PD), FreePD catalog via the GitHub `0lhi/FreePD` mirror (CC0 1.0; freepd.com domain is dead).
+  With that shift **no attribution UI is needed**. Wiring = additive `RemoteSource` variant on `StockItem`
+  + a `fetch→File` step reusing the existing upload pipeline (invariant-safe); ~8 video/8 music/8 photos.
+- **Open questions for CEO (Atlas surfacing):** (1) confirm bundled set = **true CC0/PD only** (drop
+  Pexels/Pixabay) — Ward strongly recommends yes; (2) keep the set **attribution-free** (vs adopting CC-BY
+  later, which needs a new credit UI); (3) 💰/📦 OK to add **~120–180 MB of CC0 media via Git LFS**, or
+  prefer a deploy-time asset-bucket seed; (4) starter footprint ~8 each vs leaner 5 each.
+- **Decision:** ⏳ pending (scaffold + generated seed already shipped; bundling the real set waits on the 4
+  answers above — chiefly the Tier-A correction + the Git-LFS/repo-size call)
 
 
 ### 2026-06-05 🧭 Canva-parity product push — scope gates from the flow teardown
