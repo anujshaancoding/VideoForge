@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { v4 as uuidv4 } from "uuid";
 import { listManifests, getTemplate, type TemplateManifest } from "@videoforge/templates";
 import { createProject } from "../lib/projectStore.js";
-import { cloneTemplateToProject } from "../lib/templates.js";
+import { cloneTemplateToProject, generateTemplateThumbnail } from "../lib/templates.js";
 import { useTemplateStore } from "../store/templateStore.js";
 import { Button, Field, Modal } from "../components/ui/index.js";
 import { cx } from "../components/ui/cx.js";
@@ -121,6 +121,13 @@ function TemplateCard({
   tabIndex: number;
   onKeyDown: (e: React.KeyboardEvent) => void;
 }) {
+  // Real, on-device poster (template background + its text overlays) — replaces the old
+  // gradient "video frame" placeholder. Memoised per template id; zero external bytes.
+  const poster = useMemo(() => {
+    const tpl = getTemplate(manifest.id);
+    return tpl ? generateTemplateThumbnail(tpl.document) : null;
+  }, [manifest.id]);
+
   return (
     <button
       ref={registerRef}
@@ -141,18 +148,23 @@ function TemplateCard({
           : "border-vf-border-subtle bg-vf-surface-2 hover:border-vf-border-default hover:bg-vf-surface-3",
       )}
     >
-      {/* Visual poster — larger, more "Canva card" like with stronger stage treatment and metadata.
-          This makes choosing a template feel desirable and visual (product review priority). */}
+      {/* Visual poster — a REAL generated first-frame (template background + its text
+          overlays), rendered on-device. Falls back to a neutral framed stage only when the
+          poster could not be generated (SSR/no-canvas). */}
       <div className="relative flex h-[132px] items-center justify-center overflow-hidden bg-vf-surface-sunken">
-        {/* Inner "video frame" to evoke the final export */}
-        <div className="relative flex h-[108px] w-[62px] items-center justify-center rounded-sm border border-vf-border-subtle/50 bg-[#111] shadow-inner">
-          <div
+        {poster ? (
+          <img
+            src={poster}
+            alt=""
             aria-hidden="true"
-            className="h-[92px] w-[52px] rounded-sm bg-gradient-to-b from-vf-surface-3 via-vf-surface-4 to-black/80"
+            className="h-[108px] w-auto rounded-sm border border-vf-border-subtle/50 shadow-inner"
           />
-          {/* Subtle play affordance */}
-          <span aria-hidden="true" className="absolute text-lg text-white/60">▶</span>
-        </div>
+        ) : (
+          <div className="relative flex h-[108px] w-[62px] items-center justify-center rounded-sm border border-vf-border-subtle/50 bg-[#111] shadow-inner">
+            <div aria-hidden="true" className="h-[92px] w-[52px] rounded-sm bg-vf-surface-4" />
+            <span aria-hidden="true" className="absolute text-lg text-white/60">▶</span>
+          </div>
+        )}
 
         {/* Ratio badge (bottom-left), always visible. */}
         <span className="absolute bottom-1 left-1 rounded-pill bg-black/70 px-1.5 py-0.5 text-2xs font-medium text-vf-text-primary backdrop-blur">

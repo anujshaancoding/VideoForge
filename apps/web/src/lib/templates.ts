@@ -18,11 +18,13 @@
 
 import { v4 as uuidv4 } from "uuid";
 import {
+  layoutTextOverlay,
   validateProject,
   type CaptionBlock,
   type Clip,
   type OverlayClip,
   type Project,
+  type TextOverlay,
   type Transition,
 } from "@videoforge/project-schema";
 import type { Template, TemplateManifest, TemplateSlot } from "@videoforge/templates";
@@ -414,4 +416,207 @@ export function buildExportDocument(
   );
 
   return { ...document, tracks: sanitizedTracks, transitions: sanitizedTransitions };
+}
+
+// ── Generated poster thumbnails (zero-license) ────────────────────────────────────
+//
+// The gallery used to show gradient-only placeholders. These helpers instead render a
+// REAL representative first-frame poster for a template, on-device, from the template's
+// own Project document — exactly like stockLibrary generates its backgrounds (canvas →
+// data-URL, no external bytes). Because every pixel is synthesised from the template's
+// own designed background + its own text overlays, there is ZERO third-party licensing
+// exposure (no stock photos, no fonts beyond the bundled Inter family the canvas
+// already renders, no network).
+//
+// We deliberately reuse `layoutTextOverlay` from @videoforge/project-schema — the SAME
+// percent→pixel / fontSize-floor / outline-scale math the editor's PreviewEngine and
+// the FFmpeg export consume — so the poster reads like the real first frame instead of
+// a separate, drifting mock. Empty media slots get a tasteful neutral block with a
+// small frame glyph (not a jarring gradient). Pure w.r.t. the document; uses the DOM
+// canvas, so it only runs in the browser.
+
+/** Poster aspect ratios → render box. Mirrors NewProjectModal's PRESETS (1080-class). */
+const POSTER_DIMS: Record<string, { width: number; height: number }> = {
+  "9:16": { width: 360, height: 640 },
+  "16:9": { width: 640, height: 360 },
+  "1:1": { width: 512, height: 512 },
+  "4:5": { width: 432, height: 540 },
+};
+
+/** Resolve a poster render box from the document's canvas (true ratio, capped px). */
+function posterDims(project: Project): { width: number; height: number } {
+  const byName = POSTER_DIMS[project.canvas.aspectRatio];
+  if (byName) return byName;
+  // Custom / unknown ratio: derive from the canvas, fitting the long edge to 640px.
+  const { width: cw, height: ch } = project.canvas;
+  if (cw <= 0 || ch <= 0) return POSTER_DIMS["9:16"]!;
+  const long = 640;
+  return cw >= ch
+    ? { width: long, height: Math.round((long * ch) / cw) }
+    : { width: Math.round((long * cw) / ch), height: long };
+}
+
+/** True for the bundled template/demo placeholder asset ids (no real media to draw). */
+function isPlaceholderAsset(assetId: string | null | undefined): boolean {
+  if (!assetId) return true;
+  return (
+    assetId === "__placeholder__" ||
+    assetId.startsWith("placeholder:") ||
+    assetId.startsWith("ph-") ||
+    assetId.startsWith("asset-placeholder")
+  );
+}
+
+/**
+ * Paint a tasteful "empty media slot" block: a dark neutral panel with a thin frame
+ * and a centred image-frame glyph. Intentionally NOT a gradient (the thing we replaced).
+ */
+function paintMediaPlaceholder(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+): void {
+  ctx.save();
+  ctx.fillStyle = "#161A22"; // charcoal (stockLibrary palette, dark-first)
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = "#283143"; // slate frame
+  ctx.lineWidth = Math.max(1, Math.round(Math.min(w, h) * 0.012));
+  ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
+  // Minimal image-frame glyph (mountain + sun), centred, low-emphasis.
+  const g = Math.min(w, h) * 0.22;
+  const gx = x + w / 2;
+  const gy = y + h / 2;
+  ctx.strokeStyle = "#3A4658";
+  ctx.lineWidth = Math.max(1.5, g * 0.06);
+  ctx.strokeRect(gx - g, gy - g * 0.7, g * 2, g * 1.4);
+  ctx.beginPath();
+  ctx.moveTo(gx - g * 0.8, gy + g * 0.5);
+  ctx.lineTo(gx - g * 0.2, gy - g * 0.1);
+  ctx.lineTo(gx + g * 0.2, gy + g * 0.25);
+  ctx.lineTo(gx + g * 0.6, gy - g * 0.25);
+  ctx.lineTo(gx + g * 0.8, gy + g * 0.5);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(gx + g * 0.45, gy - g * 0.35, g * 0.18, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+/** Draw one text overlay using the shared layout math (PreviewEngine parity). */
+function paintTextOverlay(
+  ctx: CanvasRenderingContext2D,
+  ov: TextOverlay,
+  w: number,
+  h: number,
+  canvasH: number,
+): void {
+  const text = (ov.text ?? "").trim();
+  if (!text) return;
+  const style = ov.style ?? ({} as TextOverlay["style"]);
+  const L = layoutTextOverlay(ov, w, h, canvasH);
+
+  ctx.save();
+  ctx.globalAlpha = Math.max(0, Math.min(1, (ov.opacity ?? 100) / 100));
+
+  // Optional text background chip (matches the editor's backgroundColor support).
+  if (style.backgroundColor) {
+    ctx.fillStyle = style.backgroundColor;
+    ctx.fillRect(L.boxX, L.boxY, L.boxW, L.boxH);
+  }
+
+  const weight = style.fontWeight ?? 600;
+  const italic = style.italic === true ? "italic " : "";
+  ctx.font = `${italic}${weight} ${L.fontPx}px Inter, system-ui, sans-serif`;
+  ctx.textAlign = style.align === "right" ? "right" : style.align === "left" ? "left" : "center";
+  ctx.textBaseline = "middle";
+
+  const lines = text.split("\n");
+  const centerY = L.boxY + L.boxH / 2;
+  const pitch = L.fontPx * (style.lineHeight ?? 1.2);
+  const firstY = centerY - ((lines.length - 1) * pitch) / 2;
+  const hasOutline = !!style.outline && L.borderPx > 0;
+  if (hasOutline) {
+    ctx.lineWidth = L.borderPx;
+    ctx.strokeStyle = style.outline!.color;
+    ctx.lineJoin = "round";
+  }
+  ctx.fillStyle = style.color || "#FFFFFF";
+  for (let i = 0; i < lines.length; i++) {
+    const lineY = firstY + i * pitch;
+    if (hasOutline) ctx.strokeText(lines[i]!, L.anchorX, lineY);
+    ctx.fillText(lines[i]!, L.anchorX, lineY);
+  }
+  ctx.restore();
+}
+
+/**
+ * Render a template's representative FIRST-FRAME poster onto a 2D context: the canvas
+ * background, a placeholder block for each media clip live at the poster time, then the
+ * text overlays (title / quote / CTA) live at that time, laid out with the SAME math the
+ * editor uses. `posterTimeMs` defaults to a beat after the opening (so intro text has
+ * appeared). Pure w.r.t. the document.
+ */
+export function paintTemplatePoster(
+  ctx: CanvasRenderingContext2D,
+  project: Project,
+  width: number,
+  height: number,
+  posterTimeMs = 800,
+): void {
+  // 1. Background — the template's designed canvas colour (dark-first default #111111).
+  ctx.fillStyle = project.canvas.backgroundColor || "#111111";
+  ctx.fillRect(0, 0, width, height);
+
+  // 2. Media: draw a tasteful placeholder block for each unfilled media clip covering
+  //    the poster time. (Templates ship placeholder assets; we have no real pixels to
+  //    draw, so this stands in for the user's media — never a gradient.)
+  for (const track of project.tracks) {
+    if (track.type !== "video") continue;
+    for (const clip of track.clips) {
+      if (posterTimeMs < clip.startOnTimeline || posterTimeMs >= clip.endOnTimeline) continue;
+      if (!isPlaceholderAsset(clip.sourceAssetId)) continue;
+      const t = clip.transform;
+      const cx = t ? (t.x / 100) * width : 0;
+      const cy = t ? (t.y / 100) * height : 0;
+      const cw = t ? (t.width / 100) * width : width;
+      const ch = t ? (t.height / 100) * height : height;
+      paintMediaPlaceholder(ctx, cx, cy, cw, ch);
+    }
+  }
+
+  // 3. Text overlays live at the poster time (title / feature / quote / CTA).
+  for (const track of project.tracks) {
+    if (track.type !== "overlay") continue;
+    for (const ov of track.clips) {
+      if (ov.kind !== "text") continue;
+      if (posterTimeMs < ov.startOnTimeline || posterTimeMs >= ov.endOnTimeline) continue;
+      paintTextOverlay(ctx, ov as TextOverlay, width, height, project.canvas.height);
+    }
+  }
+}
+
+/**
+ * Generate a template poster as a PNG data-URL, sized at the template's true aspect
+ * ratio. Returns `null` when no DOM canvas is available (SSR / tests) so callers can
+ * fall back to their existing placeholder. Zero external bytes ⇒ zero license risk.
+ */
+export function generateTemplateThumbnail(
+  project: Project,
+  posterTimeMs?: number,
+): string | null {
+  if (typeof document === "undefined") return null;
+  const { width, height } = posterDims(project);
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  try {
+    paintTemplatePoster(ctx, project, width, height, posterTimeMs);
+    return canvas.toDataURL("image/png");
+  } catch {
+    return null;
+  }
 }

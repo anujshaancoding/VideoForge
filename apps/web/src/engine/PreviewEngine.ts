@@ -23,7 +23,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import type { AudioEngine } from "./AudioEngine.js";
-import type { Clip, Project, TextOverlay, ImageOverlay } from "@videoforge/project-schema";
+import type { Clip, Project, TextOverlay, ImageOverlay, Keyframe } from "@videoforge/project-schema";
 // Shared text-overlay layout — the ONE percent→pixel/size/floor/outline-scale formula
 // the FFmpeg export also consumes, so preview geometry == export drawtext (§7.5).
 // `weightToInterFile` is export-only; preview keeps the CSS `Inter` family.
@@ -442,8 +442,10 @@ export class PreviewEngine {
         const graded = this.grader.apply(drawable, w, h, clip.colorGrade);
         if (graded) drawable = graded;
       }
-      // Per-clip opacity: first 'opacity' keyframe value (matches export clipOpacityPercent).
-      const opacity = this._clipOpacity(clip);
+      // Per-clip opacity: interpolated across the 'opacity' keyframes at the current
+      // playhead (matches the export's keyframe curve — §3.7 / preview==export). With
+      // 0/1 keyframe this is just the constant value, exactly as before.
+      const opacity = this._clipOpacity(clip, playheadMs);
       const prevAlpha = ctx.globalAlpha;
       if (opacity < 100) ctx.globalAlpha = opacity / 100;
 
@@ -476,13 +478,91 @@ export class PreviewEngine {
     }
   }
 
-  /** First 'opacity' keyframe value (0–100), or 100. Mirrors the export builder. */
-  private _clipOpacity(clip: Clip): number {
-    const kf = clip.keyframes["opacity"];
-    if (kf && kf.length > 0 && typeof kf[0]!.value === "number") {
-      return Math.max(0, Math.min(100, kf[0]!.value));
+  /**
+   * Per-clip opacity (0–100) at the given absolute-timeline playhead, INTERPOLATED
+   * across the clip's `opacity` keyframes (§3.7 keyframe engine). With 0 keyframes →
+   * 100; with 1 keyframe (or all equal) → that constant value, identical to the old
+   * first-keyframe behaviour. With ≥2 distinct keyframes → the sampled curve.
+   *
+   * THE INVARIANT: this MUST sample the exact same curve the export emits. The
+   * per-segment easing→value math lives in the shared helpers below (_easedProgress /
+   * _sampleKeyframes), which are a verbatim twin of buildFilterComplex.ts's
+   * easedProgress / sampleNumericKeyframes — the same shared-helper discipline as
+   * layoutTextOverlay. Keyframe `timeMs` is ABSOLUTE timeline ms (the editor authors
+   * it from the global playhead), so we sample with `playheadMs` directly.
+   */
+  private _clipOpacity(clip: Clip, playheadMs: number): number {
+    const kfs = this._numericKeyframes(clip, "opacity");
+    if (kfs.length === 0) return 100;
+    const v = this._sampleKeyframes(kfs, playheadMs, 100);
+    return Math.max(0, Math.min(100, v));
+  }
+
+  /** Numeric, time-ordered keyframes for a property (drops non-numeric). Twin of the export. */
+  private _numericKeyframes(
+    clip: Clip,
+    property: string,
+  ): Array<{ timeMs: number; value: number; easing: Keyframe["easing"] }> {
+    const raw = clip.keyframes[property];
+    if (!raw || raw.length === 0) return [];
+    const out: Array<{ timeMs: number; value: number; easing: Keyframe["easing"] }> = [];
+    for (const kf of raw) {
+      if (typeof kf.value === "number") out.push({ timeMs: kf.timeMs, value: kf.value, easing: kf.easing });
     }
-    return 100;
+    return out.sort((a, b) => a.timeMs - b.timeMs);
+  }
+
+  /**
+   * SHARED easing curve — MUST be byte-identical to buildFilterComplex.ts easedProgress.
+   * `hold` steps (stays at the start value); ease* use the standard quadratic curves;
+   * everything else (linear/bezier) is linear. The Inspector only authors "linear"
+   * today; the rest are supported for forward-compat with the schema's easing field.
+   */
+  private _easedProgress(
+    u: number,
+    easing: Keyframe["easing"],
+  ): number {
+    const x = u < 0 ? 0 : u > 1 ? 1 : u;
+    switch (easing) {
+      case "hold":
+        return 0;
+      case "easeIn":
+        return x * x;
+      case "easeOut":
+        return x * (2 - x);
+      case "easeInOut":
+        return x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2;
+      case "bezier":
+      case "linear":
+      default:
+        return x;
+    }
+  }
+
+  /**
+   * SHARED sampler — value of a numeric keyframe track at absolute-timeline `timeMs`,
+   * clamping the constant ends. MUST match buildFilterComplex.ts sampleNumericKeyframes.
+   */
+  private _sampleKeyframes(
+    kfs: Array<{ timeMs: number; value: number; easing: Keyframe["easing"] }>,
+    timeMs: number,
+    fallback: number,
+  ): number {
+    if (kfs.length === 0) return fallback;
+    if (kfs.length === 1 || timeMs <= kfs[0]!.timeMs) return kfs[0]!.value;
+    const last = kfs[kfs.length - 1]!;
+    if (timeMs >= last.timeMs) return last.value;
+    for (let i = 0; i < kfs.length - 1; i++) {
+      const a = kfs[i]!;
+      const b = kfs[i + 1]!;
+      if (timeMs >= a.timeMs && timeMs <= b.timeMs) {
+        const span = b.timeMs - a.timeMs;
+        const u = span > 0 ? (timeMs - a.timeMs) / span : 0;
+        const e = this._easedProgress(u, a.easing);
+        return a.value + (b.value - a.value) * e;
+      }
+    }
+    return last.value;
   }
 
   private _drawStubRect(

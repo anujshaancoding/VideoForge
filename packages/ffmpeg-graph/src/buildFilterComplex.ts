@@ -50,6 +50,7 @@ import type {
   TextOverlay,
   Transition,
   Effect,
+  Keyframe,
 } from "@videoforge/project-schema";
 import { layoutTextOverlay, weightToInterFile } from "@videoforge/project-schema";
 
@@ -689,12 +690,32 @@ export function buildExportCommand(project: Project, settings: ExportSettings): 
         );
       }
 
-      // 2d. Per-clip opacity (§10.3). opacity 100 = opaque; <100 needs an alpha plane
-      //     so the overlay chain can blend it. format=rgba then scale the alpha.
-      const opacity = clipOpacityPercent(clip);
-      if (opacity < 100) {
-        const a = (opacity / 100).toFixed(4).replace(/\.?0+$/, "") || "0";
-        steps.push("format=rgba", `colorchannelmixer=aa=${a}`);
+      // 2d. Per-clip opacity (§10.3, §3.7 keyframes). opacity 100 = opaque; anything
+      //     less needs an alpha plane so the overlay chain can blend it: format=rgba
+      //     then scale the alpha. With ≤1 opacity keyframe (or all equal) we emit a
+      //     CONSTANT aa (byte-compatible with the pre-keyframe graph). With ≥2 distinct
+      //     keyframes we drive the alpha PLANE via a `T`-driven `geq` EXPRESSION that
+      //     reproduces the SAME piecewise curve the preview samples (clipAlpha), so
+      //     animated opacity matches preview frame-for-frame.
+      const alpha = clipAlpha(clip);
+      if (alpha) {
+        if (alpha.kind === "const") {
+          // CONSTANT alpha: colorchannelmixer (byte-compatible with the pre-keyframe
+          // graph — its `aa` is a static double, which is all a constant needs).
+          steps.push("format=rgba", `colorchannelmixer=aa=${num4(alpha.alpha)}`);
+        } else {
+          // TIME-VARYING alpha: colorchannelmixer's `aa` is NOT expression-evaluated,
+          // so a per-frame curve must drive the ALPHA PLANE directly. `geq` is the one
+          // filter whose plane outputs accept the time variable `T` (seconds). On
+          // yuva420p we rewrite only the alpha plane (`a`) from the shared curve and
+          // pass luma/chroma through untouched, so colour is unchanged and only opacity
+          // animates — reproducing the preview's `globalAlpha` ramp frame-exactly.
+          // `alpha.expr` is in 0..1; geq's alpha plane is 0..255.
+          steps.push(
+            "format=yuva420p",
+            `geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='255*(${alpha.expr})'`,
+          );
+        }
       }
 
       const label = `vc${idx}`;
@@ -1034,21 +1055,195 @@ export function atempoChain(speed: number): string[] {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Per-clip opacity.
+// Per-clip opacity — keyframe interpolation (§3.7 keyframe engine).
 //
 // The §18 Clip type (video/audio) has no first-class `opacity` field — per-clip
 // opacity for media clips is an MVP extension surfaced via keyframes in the editor
-// and is OUT of the locked schema subset (MVP_Scope §0.4). To honour the contract's
-// "per-clip opacity" requirement without mutating the shared schema, we read an
-// optional constant `opacity` keyframe (first value, 0–100) when present, else 100.
-// Pure standalone function — no prototype/global mutation.
-// MVP-STUB: see §10.3 — full keyframed opacity animates via overlay alpha per frame.
+// and is OUT of the locked schema subset (MVP_Scope §0.4). The editor authors an
+// ordered `opacity` keyframe array (Inspector → addKeyframe), with `timeMs` in
+// ABSOLUTE TIMELINE ms (the value the Inspector passes is the global playhead).
+//
+// THE INVARIANT (CLAUDE.md): preview must == export, frame-for-frame. The preview
+// (PreviewEngine._clipOpacity) and this builder MUST sample the exact same curve.
+// The canonical numeric formula is `easedProgress` + `sampleNumericKeyframes` (exported
+// here so it is a shareable/unit-testable single source of truth), mirrored verbatim in
+// PreviewEngine._easedProgress/_sampleKeyframes (the same shared-helper discipline as
+// `layoutTextOverlay`). The EXPORT cannot SAMPLE per frame in a pure builder, so it emits
+// the ALGEBRAIC TWIN of that formula as a `T`-driven ffmpeg expression (`easingExprFor` →
+// `clipAlpha`) that the render-time `geq` evaluates frame-by-frame — reproducing the SAME
+// piecewise curve the preview samples. `colorchannelmixer`'s `aa` is a static double (NOT
+// expression-evaluated), so the time-varying path drives the alpha PLANE via `geq` instead;
+// the constant path keeps the original `colorchannelmixer=aa=<n>` (byte-compatible).
+//
+// BACKWARD-COMPAT: 0 or 1 keyframe (or all equal) ⇒ a single constant value (no time term,
+// no `geq`, no graph churn), identical to the previous first-keyframe behaviour, so
+// non-animated clips' goldens do not move.
 // ─────────────────────────────────────────────────────────────────────────────
-function clipOpacityPercent(clip: Clip): number {
-  const kf = clip.keyframes["opacity"];
-  if (kf && kf.length > 0 && typeof kf[0]!.value === "number") {
-    const v = kf[0]!.value;
-    return Math.max(0, Math.min(100, v));
+
+/** Numeric keyframe in absolute-timeline ms (the editor authors these). */
+export interface NumKeyframe {
+  timeMs: number;
+  value: number;
+  easing: Keyframe["easing"];
+}
+
+/** Extract the numeric, time-ordered keyframes for a property (drops non-numeric / unsorted). */
+function numericKeyframes(clip: Clip, property: string): NumKeyframe[] {
+  const raw = clip.keyframes[property];
+  if (!raw || raw.length === 0) return [];
+  const out: NumKeyframe[] = [];
+  for (const kf of raw) {
+    if (typeof kf.value === "number") {
+      out.push({ timeMs: kf.timeMs, value: kf.value, easing: kf.easing });
+    }
   }
-  return 100;
+  return out.sort((a, b) => a.timeMs - b.timeMs);
+}
+
+/**
+ * SHARED easing curve — given a 0..1 linear fraction `u` and the segment's easing,
+ * return the eased fraction. MUST be byte-identical to PreviewEngine.easedProgress.
+ * Only the easings the schema defines are handled; anything unknown falls back to
+ * linear. `hold` keeps the start value until the next keyframe (step). The ease
+ * variants use the standard quadratic curves (cheap + exactly reproducible in an
+ * ffmpeg expression). NOTE: the Inspector only ever authors "linear" today, so in
+ * practice opacity is piecewise-linear; the rest are supported for forward-compat.
+ */
+export function easedProgress(u: number, easing: Keyframe["easing"]): number {
+  const x = u < 0 ? 0 : u > 1 ? 1 : u;
+  switch (easing) {
+    case "hold":
+      return 0; // value stays at the start keyframe across the whole segment
+    case "easeIn":
+      return x * x;
+    case "easeOut":
+      return x * (2 - x);
+    case "easeInOut":
+      return x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2;
+    case "bezier": // bezier control points are not authored in the MVP UI → treat as linear
+    case "linear":
+    default:
+      return x;
+  }
+}
+
+/**
+ * SHARED sampler — value of a numeric keyframe track at absolute-timeline `timeMs`.
+ * Clamps before the first / after the last keyframe (constant ends). MUST match
+ * PreviewEngine.sampleNumericKeyframes exactly. Returns `fallback` when no numeric
+ * keyframes exist.
+ */
+export function sampleNumericKeyframes(kfs: NumKeyframe[], timeMs: number, fallback: number): number {
+  if (kfs.length === 0) return fallback;
+  if (kfs.length === 1 || timeMs <= kfs[0]!.timeMs) return kfs[0]!.value;
+  const last = kfs[kfs.length - 1]!;
+  if (timeMs >= last.timeMs) return last.value;
+  for (let i = 0; i < kfs.length - 1; i++) {
+    const a = kfs[i]!;
+    const b = kfs[i + 1]!;
+    if (timeMs >= a.timeMs && timeMs <= b.timeMs) {
+      const span = b.timeMs - a.timeMs;
+      const u = span > 0 ? (timeMs - a.timeMs) / span : 0;
+      const e = easedProgress(u, a.easing);
+      return a.value + (b.value - a.value) * e;
+    }
+  }
+  return last.value;
+}
+
+/** Stable, minimal decimal (mirrors the other emitters here). */
+function num4(n: number): string {
+  return n.toFixed(4).replace(/\.?0+$/, "") || "0";
+}
+
+/**
+ * Emit the per-clip alpha as either a constant (0/1 keyframe / all-equal → byte-
+ * compatible with the old graph) or a time-varying ffmpeg expression that reproduces
+ * the SAME piecewise curve the preview samples. The expression is evaluated on the
+ * per-clip stream by `geq` (variable `T`, seconds), where (after §2a setpts) `T` runs
+ * 0..clipOutputDuration mapping linearly onto the timeline window — so absolute-
+ * timeline keyframe time is `T + startOnTimeline/1000`. Alpha = opacity/100 (0..1).
+ *
+ * Returns `{ kind:"const", alpha }` (no time term, no churn) when there is ≤1 keyframe
+ * or every keyframe shares one value; otherwise `{ kind:"expr", expr }` carrying a
+ * `geq`-ready alpha-plane expression (0..1; the caller scales to 0..255). Returns null
+ * when fully opaque (const 100 / no keyframes) so the opacity stage is omitted as before.
+ */
+function clipAlpha(clip: Clip): { kind: "const"; alpha: number } | { kind: "expr"; expr: string } | null {
+  const kfs = numericKeyframes(clip, "opacity");
+  if (kfs.length === 0) return null;
+
+  const clamp01 = (pct: number) => Math.max(0, Math.min(100, pct)) / 100;
+
+  // Constant when 1 keyframe, or all values equal (animation is a no-op).
+  const allEqual = kfs.every((k) => k.value === kfs[0]!.value);
+  if (kfs.length === 1 || allEqual) {
+    const alpha = clamp01(kfs[0]!.value);
+    return alpha >= 1 ? null : { kind: "const", alpha };
+  }
+
+  // Time-varying: build a nested if() chain over segments in absolute-timeline secs.
+  // The export drives this through `geq`, whose per-frame time variable is `T` (the
+  // frame's timestamp in seconds). On the per-clip stream `T` runs 0..clipOutputDur
+  // (post-§2a setpts, mapping linearly onto the timeline window), so the ABSOLUTE
+  // timeline time is `T + startOnTimeline/1000`. Keyframe times are absolute, so we
+  // compare against that. (PreviewEngine samples with the same absolute timeline ms.)
+  const startOffsetSec = clip.startOnTimeline / 1000;
+  const T = `(T+${num4(startOffsetSec)})`;
+
+  // Before the first kf and after the last: clamp to the end values (constant ends).
+  const firstA = clamp01(kfs[0]!.value);
+  const lastA = clamp01(kfs[kfs.length - 1]!.value);
+
+  // Build from the last segment inward so the if() nesting reads start→end.
+  let expr = `${num4(lastA)}`; // value at/after the last keyframe
+  for (let i = kfs.length - 2; i >= 0; i--) {
+    const a = kfs[i]!;
+    const b = kfs[i + 1]!;
+    const aSec = a.timeMs / 1000;
+    const bSec = b.timeMs / 1000;
+    const span = bSec - aSec;
+    const aA = clamp01(a.value);
+    const bA = clamp01(b.value);
+    // Linear fraction u within this segment, then the SAME easing curve as the sampler.
+    const u = span > 0 ? `((${T}-${num4(aSec)})/${num4(span)})` : "0";
+    const segExpr = easingExprFor(a.easing, u, aA, bA);
+    // If T < bSec we are in (or before) this segment; else fall through to the next.
+    expr = `if(lt(${T},${num4(bSec)}),${segExpr},${expr})`;
+  }
+  // Clamp before the first keyframe to the first value.
+  expr = `if(lt(${T},${num4(kfs[0]!.timeMs / 1000)}),${num4(firstA)},${expr})`;
+
+  return { kind: "expr", expr };
+}
+
+/**
+ * ffmpeg-expression form of `a + (b-a)*easedProgress(u, easing)` for one segment,
+ * with `u` already the linear 0..1 fraction expression. MUST be the algebraic twin
+ * of `easedProgress` so the export curve equals the preview curve.
+ */
+function easingExprFor(easing: Keyframe["easing"], u: string, a: number, b: number): string {
+  const d = b - a; // delta value over the segment (alpha units)
+  const lerp = (eFrac: string) => `(${num4(a)}+(${num4(d)})*${eFrac})`;
+  // Clamp the linear fraction to 0..1 (the segment is only entered within its window,
+  // but guard the boundaries so floating error can't push alpha outside [a,b]). The
+  // whole expression is single-quoted in the filtergraph, so commas inside these expr
+  // functions are consumed by ffmpeg's expression evaluator — no `\,` escaping needed.
+  // `easedProgress`'s `(u<0?0:u>1?1:u)` == clip(u,0,1); `1 - (-2u+2)^2/2` is written
+  // with an explicit product (no `pow`) to keep the expression comma-light + exact.
+  const uc = `clip(${u},0,1)`;
+  switch (easing) {
+    case "hold":
+      return `${num4(a)}`;
+    case "easeIn":
+      return lerp(`(${uc}*${uc})`);
+    case "easeOut":
+      return lerp(`(${uc}*(2-${uc}))`);
+    case "easeInOut":
+      return lerp(`if(lt(${uc},0.5),2*${uc}*${uc},1-(-2*${uc}+2)*(-2*${uc}+2)/2)`);
+    case "bezier":
+    case "linear":
+    default:
+      return lerp(uc);
+  }
 }

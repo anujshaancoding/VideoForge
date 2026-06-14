@@ -9,7 +9,7 @@ import { readViewPrefs, writeViewPrefs } from '../../lib/viewPrefs.js';
 import { parseCaptions } from '../../lib/captions.js';
 import { resolveManifest } from '../../store/templateStore.js';
 import { isSlotFilled } from '../../lib/templates.js';
-import { Image, Type, Captions, Package, Shapes, Sparkles, ChevronLeft, Upload, Music, AlertTriangle, Pencil, Trash2 } from 'lucide-react';
+import { Image, Type, Captions, Package, Shapes, Sparkles, ChevronLeft, Upload, Music, AlertTriangle, Pencil, Trash2, Search, X } from 'lucide-react';
 import { stockItemsForTab, renderBackgroundToFile, thumbnailCss, STOCK_CATEGORIES, type StockItem } from '../../lib/stockLibrary.js';
 
 // MediaPanel — left rail (§7.A). Three-section rail: Media / Text / Captions.
@@ -123,6 +123,21 @@ export default function MediaPanel() {
     assets.forEach((a) => { if (!map.has(a.id)) map.set(a.id, a); });
     return Array.from(map.values());
   }, [seedAssets, assets]);
+
+  // Media-library search + per-kind filter (CEO-greenlit 2026-06-14). UI-only: filters
+  // the user's library grid by filename substring (case-insensitive) AND by asset kind.
+  // Scoped to the Media tab; does not touch the Stock tab, upload, or timeline behaviour.
+  const [search, setSearch] = useState('');
+  const [kindFilter, setKindFilter] = useState<'all' | MediaKind>('all');
+
+  const filteredAssets = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return allAssets.filter(
+      (a) =>
+        (kindFilter === 'all' || a.kind === kindFilter) &&
+        (q === '' || a.name.toLowerCase().includes(q)),
+    );
+  }, [allAssets, search, kindFilter]);
 
   const updateAsset = useCallback((id: string, patch: Partial<MediaAsset>) => {
     setAssets((prev) => prev.map((a) => (a.id === id ? { ...a, ...patch } : a)));
@@ -657,9 +672,65 @@ export default function MediaPanel() {
             </Button>
             <p className="mt-1 text-center text-2xs text-vf-text-tertiary">or drag &amp; drop files here</p>
           </div>
+          {/* Library search + per-kind filter chips. Only shown once the library has
+              something to search; an empty library leads straight to the dropzone CTA. */}
+          {allAssets.length > 0 && (
+            <div className="shrink-0 px-3 pb-2">
+              <div className="relative">
+                <Search
+                  className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-vf-text-tertiary"
+                  aria-hidden="true"
+                />
+                <input
+                  type="text"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search media…"
+                  aria-label="Search media library by name"
+                  data-testid="media-search-input"
+                  className="h-9 w-full rounded-sm border border-vf-border-default bg-vf-surface-2 pl-8 pr-8 text-sm text-vf-text-primary placeholder:text-vf-text-tertiary transition-colors hover:border-vf-border-strong focus:border-vf-border-strong focus:outline-none"
+                />
+                {search !== '' && (
+                  <button
+                    type="button"
+                    aria-label="Clear search"
+                    title="Clear search"
+                    onClick={() => setSearch('')}
+                    className="absolute right-1.5 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-vf-text-tertiary hover:bg-vf-surface-3 hover:text-vf-text-primary"
+                  >
+                    <X className="h-3.5 w-3.5" aria-hidden="true" />
+                  </button>
+                )}
+              </div>
+              <div role="group" aria-label="Filter by media type" className="mt-2 flex flex-wrap gap-1.5">
+                {([
+                  { key: 'all', label: 'All' },
+                  { key: 'video', label: 'Video' },
+                  { key: 'audio', label: 'Audio' },
+                  { key: 'image', label: 'Image' },
+                ] as const).map(({ key, label }) => (
+                  <button
+                    key={key}
+                    type="button"
+                    aria-pressed={kindFilter === key}
+                    onClick={() => setKindFilter(key)}
+                    data-testid={`media-filter-${key}`}
+                    className={cx(
+                      'rounded-pill border px-2.5 py-1 text-2xs font-medium transition-colors',
+                      kindFilter === key
+                        ? 'border-vf-selection bg-vf-selection/15 text-vf-text-primary'
+                        : 'border-vf-border-subtle bg-vf-surface-2 text-vf-text-secondary hover:border-vf-border-strong hover:text-vf-text-primary',
+                    )}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 pb-3 w-full">
             <div className="grid grid-cols-2 gap-2.5 w-full">
-              {allAssets.map((asset) => (
+              {filteredAssets.map((asset) => (
                 <div key={asset.id} className="group relative">
                 {/* Hover actions (§3.1 rename/delete). Siblings of the card button — not
                     nested — so the markup stays valid; only for settled (ready) assets. */}
@@ -768,6 +839,25 @@ export default function MediaPanel() {
                 </div>
               ))}
             </div>
+            {allAssets.length > 0 && filteredAssets.length === 0 && (
+              // "No matches" state — distinct from the genuinely-empty library below.
+              // The library has assets, but the active search/kind filter excludes them all.
+              <div
+                data-testid="media-no-matches"
+                className="mt-2 flex w-full flex-col items-center justify-center gap-2 rounded-lg border border-vf-border-subtle bg-vf-surface-2/60 px-4 py-10 text-center"
+              >
+                <Search className="h-7 w-7 text-vf-text-tertiary" aria-hidden="true" />
+                <span className="text-sm font-medium text-vf-text-secondary">No media matches your filters</span>
+                <span className="text-2xs text-vf-text-tertiary">Try a different search or clear the filters.</span>
+                <button
+                  type="button"
+                  onClick={() => { setSearch(''); setKindFilter('all'); }}
+                  className="mt-1 rounded-pill border border-vf-border-subtle bg-vf-surface-2 px-3 py-1 text-2xs font-medium text-vf-text-secondary hover:border-vf-border-strong hover:text-vf-text-primary"
+                >
+                  Clear filters
+                </button>
+              </div>
+            )}
             {allAssets.length === 0 && (
               // Editor first-open empty state (§6.3): a prominent dashed drop-zone — the
               // brand's first call to action. Clicking it opens the same file picker as

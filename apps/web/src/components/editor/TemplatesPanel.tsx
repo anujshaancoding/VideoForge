@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useEditorStore } from "../../store/editorStore.js";
 import { useTemplateStore } from "../../store/templateStore.js";
-import { cloneTemplateToProject } from "../../lib/templates.js";
+import { cloneTemplateToProject, generateTemplateThumbnail } from "../../lib/templates.js";
 import { getTemplate } from "@videoforge/templates";
 import { cx } from "../ui/cx.js";
 import { Search, X, Sparkles } from "lucide-react";
@@ -762,6 +762,120 @@ function Section({
   );
 }
 
+// Aspect ratio → poster dims (mirrors templates.ts POSTER_DIMS; 1080-class, capped px).
+const POSTER_DIMS_BY_AR: Record<string, { width: number; height: number }> = {
+  "9:16": { width: 1080, height: 1920 },
+  "16:9": { width: 1920, height: 1080 },
+  "1:1": { width: 1080, height: 1080 },
+  "4:5": { width: 1080, height: 1350 },
+};
+
+// Build a minimal poster-only Project for a synthetic browse template (no editor
+// context needed): the template's name as a centred title overlay over a dark canvas +
+// a single full-frame media placeholder. Lets generateTemplateThumbnail draw a real,
+// zero-license first-frame poster for synthetic cards too.
+function buildPosterDocForBrowseTemplate(tpl: BrowseTemplate): Project {
+  const dims = POSTER_DIMS_BY_AR[tpl.aspectRatio] ?? POSTER_DIMS_BY_AR["9:16"]!;
+  return {
+    schemaVersion: 1,
+    revision: 1,
+    id: "poster:" + tpl.id,
+    title: tpl.name,
+    description: tpl.description,
+    canvas: {
+      width: dims.width,
+      height: dims.height,
+      frameRate: 30,
+      aspectRatio: tpl.aspectRatio,
+      backgroundColor: "#111111",
+    },
+    tracks: [
+      {
+        id: "poster-video",
+        type: "video",
+        name: "Video",
+        colour: "#3b82f6",
+        height: 80,
+        locked: false,
+        muted: false,
+        solo: false,
+        hidden: false,
+        clips: [
+          {
+            id: "poster-clip",
+            trackId: "poster-video",
+            sourceAssetId: "__placeholder__",
+            startOnTimeline: 0,
+            endOnTimeline: 4000,
+            trimIn: 0,
+            trimOut: 4000,
+            speed: 1,
+            linkedClipId: null,
+            effects: [],
+            keyframes: {},
+            transform: { x: 0, y: 0, width: 100, height: 100 },
+            colorGrade: null,
+            kenBurns: null,
+            flipH: false,
+            flipV: false,
+            opacity: 100,
+          },
+        ],
+      },
+      {
+        id: "poster-overlay",
+        type: "overlay",
+        name: "Text",
+        colour: "#8b5cf6",
+        height: 64,
+        locked: false,
+        muted: false,
+        solo: false,
+        hidden: false,
+        clips: [
+          {
+            id: "poster-title",
+            trackId: "poster-overlay",
+            kind: "text",
+            text: tpl.name,
+            startOnTimeline: 0,
+            endOnTimeline: 4000,
+            canvasX: 8,
+            canvasY: 40,
+            width: 84,
+            height: 20,
+            rotation: 0,
+            opacity: 100,
+            animation: {},
+            keyframes: {},
+            style: {
+              fontFamily: "Inter",
+              fontSize: 120,
+              fontWeight: 800,
+              color: "#FFFFFF",
+              align: "center",
+              outline: { width: 2, color: "#000000", position: "outside" },
+              shadow: { color: "#00000066", offsetX: 0, offsetY: 3, blur: 6 },
+              backgroundColor: null,
+            },
+          } as any,
+        ],
+      },
+    ] as any,
+    captionTracks: [],
+    transitions: [],
+    markers: [],
+    exportPresets: [],
+    ownerId: "self",
+    workspaceId: "ws-self",
+    collaborators: [],
+    isPublic: false,
+    templateId: null,
+    createdAt: "2026-06-04T00:00:00.000Z",
+    updatedAt: "2026-06-04T00:00:00.000Z",
+  } as Project;
+}
+
 function TemplateCard({
   tpl,
   onUse,
@@ -774,7 +888,25 @@ function TemplateCard({
   const [hovered, setHovered] = useState(false);
   const isBlank = tpl.id === "blank";
 
-  const imgSrc = hovered && tpl.previewGifUrl ? tpl.previewGifUrl : tpl.thumbnailUrl;
+  // Real generated first-frame poster (template background + text overlays), on-device,
+  // zero external bytes. Package templates use their real document; synthetic ones use a
+  // lightweight poster doc. Falls back to the legacy thumbnailUrl if generation is
+  // unavailable (e.g. user-saved templates that already carry a captured data-URL thumb).
+  const poster = useMemo(() => {
+    if (isBlank) return null;
+    if (tpl.id.startsWith("user-")) return null; // keep user-captured thumbnails
+    try {
+      if (tpl.manifestId) {
+        const pkg = getTemplate(tpl.manifestId);
+        if (pkg) return generateTemplateThumbnail(pkg.document);
+      }
+      return generateTemplateThumbnail(buildPosterDocForBrowseTemplate(tpl));
+    } catch {
+      return null;
+    }
+  }, [tpl.id, tpl.manifestId, isBlank]);
+
+  const imgSrc = poster ?? (hovered && tpl.previewGifUrl ? tpl.previewGifUrl : tpl.thumbnailUrl);
 
   return (
     <button
