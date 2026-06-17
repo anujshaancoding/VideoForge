@@ -15,6 +15,13 @@
       "when": 1749859200000,
       "tag": "0001_project_versions",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1750032000000,
+      "tag": "0002_script_manifests",
+      "breakpoints": true
     }
   ]
 }

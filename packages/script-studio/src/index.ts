@@ -24,4 +24,32 @@ export type {
   ScriptSegmentMapping,
   ScriptSceneStyle,
   ScriptAttribution,
+  PlannedScriptManifest,
+  PlannedSceneMapping,
+  AssembledPlannedScript,
 } from "./types.js";
+
+// ── Script Studio v2 — Contract A (scene plan) + Contract B (planned assembler) ──
+
+export {
+  scenePlanSchema,
+  plannedSceneSchema,
+  brollSuggestionSchema,
+  validateScenePlan,
+  planFromHeuristic,
+  heuristicDurationMs,
+  MAX_SCENES,
+} from "./plan.js";
+export type {
+  ScenePlan,
+  PlannedScene,
+  BrollSuggestion,
+  ValidateScenePlanResult,
+} from "./plan.js";
+
+export { assemblePlannedProject, arrangeAssets } from "./assemblePlanned.js";
+export type {
+  AssemblePlannedInput,
+  SceneVo,
+  PlacedAsset,
+} from "./assemblePlanned.js";

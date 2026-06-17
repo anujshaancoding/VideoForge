@@ -102,6 +102,17 @@ export const EffectSchema = z
   })
   .strict();
 
+/** Progressive "draw-on" reveal of a clip (whiteboard-animation effect). */
+export const RevealWipeSchema = z
+  .object({
+    direction: z.enum(["top", "bottom", "left", "right"]),
+    durationMs: millis,
+    easing: z
+      .enum(["linear", "easeIn", "easeOut", "easeInOut", "hold", "bezier"])
+      .optional(),
+  })
+  .strict();
+
 // ── Clip ─────────────────────────────────────────────────────────────────────
 
 export const ClipSchema = z
@@ -127,6 +138,8 @@ export const ClipSchema = z
     flipV: z.boolean().optional(),
     // How the source fills the transform box (logos / PiP / image stickers). Absent ⇒ "fill".
     fit: z.enum(["fill", "contain", "cover"]).optional(),
+    // Whiteboard "draw-on" progressive reveal. Absent ⇒ clip shows fully from t=0.
+    revealWipe: RevealWipeSchema.nullable().optional(),
   })
   .strict();
 

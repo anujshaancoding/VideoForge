@@ -177,6 +177,79 @@ describe("buildExportCommand — per-clip transform (PiP) export parity", () => 
   });
 });
 
+describe("buildExportCommand — still-image clips are looped to fill their window", () => {
+  function firstVideoClip(p: Project) {
+    const vt = p.tracks.find((t) => t.type === "video");
+    if (!vt || vt.type !== "video") throw new Error("no video track");
+    return vt.clips[0]!;
+  }
+
+  it("an image asset emits -loop 1 + -t (no -ss/-to seek)", () => {
+    const p: Project = JSON.parse(JSON.stringify(sampleProject));
+    const clip = firstVideoClip(p);
+    const kinds = new Map([[clip.sourceAssetId, "image" as const]]);
+    const { inputs } = buildExportCommand(p, burnSettings, kinds);
+    const inp = inputs.find((i) => i.path === `asset:${clip.sourceAssetId}`)!;
+    expect(inp.preArgs).toContain("-loop");
+    expect(inp.preArgs).not.toContain("-ss");
+    const expected = ((clip.endOnTimeline - clip.startOnTimeline) / 1000).toString();
+    expect(inp.preArgs[inp.preArgs.indexOf("-t") + 1]).toBe(expected);
+  });
+
+  it("without assetKinds (or as video) the clip still uses accurate -ss/-to seek", () => {
+    const p: Project = JSON.parse(JSON.stringify(sampleProject));
+    const clip = firstVideoClip(p);
+    const { inputs } = buildExportCommand(p, burnSettings); // no kinds → historical
+    const inp = inputs.find((i) => i.path === `asset:${clip.sourceAssetId}`)!;
+    expect(inp.preArgs).toContain("-ss");
+    expect(inp.preArgs).toContain("-to");
+    expect(inp.preArgs).not.toContain("-loop");
+  });
+});
+
+describe("buildExportCommand — whiteboard draw-on reveal (revealWipe, WYCIWYG)", () => {
+  function withReveal(
+    reveal: { direction: "top" | "bottom" | "left" | "right"; durationMs: number; easing?: "linear" } | null,
+  ): string {
+    const p: Project = JSON.parse(JSON.stringify(sampleProject));
+    p.transitions = []; // assert the single clip's own filter chain directly
+    const vt = p.tracks.find((t) => t.type === "video");
+    if (vt && vt.type === "video") {
+      if (reveal) vt.clips[0]!.revealWipe = reveal;
+      else delete (vt.clips[0] as { revealWipe?: unknown }).revealWipe;
+    }
+    return buildExportCommand(p, burnSettings).filterComplex;
+  }
+
+  it("a clip WITHOUT revealWipe emits no reveal geq (byte-compatible default)", () => {
+    expect(withReveal(null)).not.toContain("alpha(X,Y),0)");
+  });
+
+  it("top reveal drives the alpha plane with a position-dependent geq edge", () => {
+    const fc = withReveal({ direction: "top", durationMs: 1000, easing: "linear" });
+    expect(fc).toContain("format=yuva420p");
+    expect(fc).toContain("geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='if(lt(Y,H*(");
+    expect(fc).toContain("alpha(X,Y),0)"); // revealed region keeps source alpha
+  });
+
+  it("each direction emits its own edge expression", () => {
+    expect(withReveal({ direction: "top", durationMs: 1000 })).toContain("if(lt(Y,H*(");
+    expect(withReveal({ direction: "bottom", durationMs: 1000 })).toContain("if(gte(Y,H*(1-(");
+    expect(withReveal({ direction: "left", durationMs: 1000 })).toContain("if(lt(X,W*(");
+    expect(withReveal({ direction: "right", durationMs: 1000 })).toContain("if(gte(X,W*(1-(");
+  });
+
+  it("a non-positive duration is treated as no reveal (clip shows fully)", () => {
+    expect(withReveal({ direction: "top", durationMs: 0 })).not.toContain("alpha(X,Y),0)");
+  });
+
+  it("is deterministic for the same reveal input", () => {
+    const a = withReveal({ direction: "top", durationMs: 1200, easing: "linear" });
+    const b = withReveal({ direction: "top", durationMs: 1200, easing: "linear" });
+    expect(a).toBe(b);
+  });
+});
+
 describe("buildExportCommand — audio mix (amix normalize=0 + alimiter, §10.3 D-6)", () => {
   it("sums tracks with amix=...:normalize=0 and applies an alimiter master", () => {
     const { filterComplex } = buildExportCommand(sampleProject, burnSettings);

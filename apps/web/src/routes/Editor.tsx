@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   CanvasStage,
   Inspector,
@@ -20,6 +20,7 @@ import { isSlotFilled } from "../lib/templates.js";
 import { armAutosave, disarmAutosave, saveNow } from "../lib/useAutosave.js";
 import { readViewPrefs, writeViewPrefs } from "../lib/viewPrefs.js";
 import { Button, Tooltip } from "../components/ui/index.js";
+import AutoArrangeModal from "../components/editor/AutoArrangeModal.js";
 import { cx } from "../components/ui/cx.js";
 import { previewEngine } from "../engine/index.js";
 import { wsClient } from "../lib/wsClient.js";
@@ -61,6 +62,7 @@ const TIMELINE_HEIGHT = 260; // px, §3.4 default (180–600 resizable handled l
 export default function Editor() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const loadProject = useEditorStore((s) => s.loadProject);
   const setZoom = useEditorStore((s) => s.setZoom);
   // Hydrate from the server document whenever the route id is not yet the loaded
@@ -79,6 +81,30 @@ export default function Editor() {
   const [loading, setLoading] = useState(true);
   const [retry, setRetry] = useState(0);
   const [leftRailTab, setLeftRailTab] = useState<string | null>(null);
+
+  // Script Studio hand-off (Contract D, step 5): arriving with ?arrange=1 means this
+  // project was just generated from a script — offer the Auto-arrange "fill your
+  // shots" tray. We auto-open it once, and keep a persistent button to reopen it.
+  const cameFromScript = searchParams.get("arrange") === "1";
+  const [arrangeOpen, setArrangeOpen] = useState(false);
+  const arrangeAutoOpenedRef = useRef(false);
+  useEffect(() => {
+    if (loading || notFound || loadError) return;
+    if (cameFromScript && !arrangeAutoOpenedRef.current) {
+      arrangeAutoOpenedRef.current = true;
+      setArrangeOpen(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cameFromScript, loading, notFound, loadError]);
+  const closeArrange = useCallback(() => {
+    setArrangeOpen(false);
+    // Drop the flag from the URL so a reload doesn't re-pop the tray.
+    if (searchParams.has("arrange")) {
+      const next = new URLSearchParams(searchParams);
+      next.delete("arrange");
+      setSearchParams(next, { replace: true });
+    }
+  }, [searchParams, setSearchParams]);
   const leftRailTabRef = useRef<string | null>(null);
   useEffect(() => { leftRailTabRef.current = leftRailTab; }, [leftRailTab]);
 
@@ -777,6 +803,21 @@ export default function Editor() {
         <div className="row-start-4 border-t border-vf-border-subtle">
           <StatusBar />
         </div>
+
+        {/* Script Studio Auto-arrange affordance: a persistent reopen button once this
+            project was generated from a script, plus the upload+arrange tray itself. */}
+        {cameFromScript && !arrangeOpen && (
+          <button
+            type="button"
+            onClick={() => setArrangeOpen(true)}
+            data-testid="reopen-arrange-btn"
+            className="fixed bottom-20 right-4 z-30 inline-flex items-center gap-2 rounded-pill border border-vf-selection/60 bg-vf-surface-2 px-4 py-2 text-sm font-medium text-vf-text-primary shadow-vf-2 hover:bg-vf-surface-3"
+          >
+            <Sparkles className="h-4 w-4 text-vf-selection" aria-hidden="true" />
+            Auto-arrange footage
+          </button>
+        )}
+        <AutoArrangeModal open={arrangeOpen} onClose={closeArrange} />
       </div>
     </EditorErrorBoundary>
   );

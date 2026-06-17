@@ -6,6 +6,65 @@ Format per entry: **Shipped · In-flight · Blocked · Decisions needed · Today
 
 ---
 
+### 2026-06-17 — ✏️ Script Studio: $0 AI sketch visuals (script → narrated sketch video)
+- **Shipped:** zero-cost auto-illustration for Script Studio. Scout swept the dev community →
+  decoupled architecture: **Draw Things** (local, free, A1111 HTTP API on :7860) generates a base
+  image per scene, then a uniform **sharp** sketch filter (pen/graphite/color, default pen) styles
+  every frame — which also solves cross-scene consistency. New apps/api modules: `imagegen.ts`
+  (drawthings→pollinations→placeholder seam), `sketch.ts`, `sketchScenes.ts`; folded into `/generate`
+  via `sketchStyle` (rides the existing `script` BullMQ job) + standalone `/sketch` route; web style
+  picker added. Invariant untouched — sketches become ordinary photo assets placed by L1 arrangeAssets.
+- **Verified:** 7/7 new tests green, api+web typecheck clean, end-to-end against live Draw Things
+  (SDXL Turbo, ~12s/image). Filter is deterministic → golden-able.
+- **In-flight:** first real 4–5 min video on a CEO-supplied script (needs full stack up).
+- **Blocked:** nothing.
+- **Decisions needed:** none now. FUTURE gate (Ward): SDXL Turbo is non-commercial — swap to FLUX.1
+  schnell (Apache-2.0) before any commercial publish. Pre-existing exports-document watermark test
+  failures are unrelated (fail on baseline) — flag for whoever owns the export branch.
+- **Today's plan:** CEO pastes a script → run plan→generate(sketchStyle=pen)→editor→export.
+
+### 2026-06-17 — ✏️ Whiteboard "draw-on" reveal + 1080p resolution fix (Forge-gated)
+- **Shipped:** (1) **Resolution fix** — sketches were generated 768² square (blurry on the 1080×1920
+  canvas); now generate 9:16 portrait + upscale each styled frame to full 1080×1920. (2) **Whiteboard
+  draw-on animation, no hand** (the look from the CEO's reference video): each scene's line-art reveals
+  progressively top→bottom then holds. Forge architected it as an invariant-safe additive clip field
+  `Clip.revealWipe` — export emits a position-dependent `geq` alpha edge (twin of the opacity geq),
+  preview clips a growing `ctx.rect`, both share the easing twin → **preview == export by construction**.
+- **Verified:** ffmpeg-graph reveal unit tests + script-studio placement tests green (75 + 70); all
+  packages typecheck; byte-identical output when `revealWipe` absent (no regression). Simulated reveal
+  frames locally to confirm the look.
+- **Blocked:** nothing for dev. **REMAINING before a real export ships:** generate the golden FRAME
+  fixture in the pinned-FFmpeg CI/docker env (can't render locally — no ffmpeg on the Mac).
+- **Decisions needed:** none. Phase 2 (true stroke-order draw + optional hand) deferred.
+- **Today's plan:** bring the local stack up, run a CEO script end-to-end, eyeball the reveal in the editor.
+
+### 2026-06-15 — 🎬 Script Studio v2 "auto video from a script" — full chain built (demo-grade)
+- **CEO directive:** paste a script → AI scene-plan (names the video/photo each scene needs) + auto TTS
+  voice + dual captions (small + big full-screen) → upload footage → auto-place & retime to the words →
+  auto background music with ducking. **Target: full chain demo-grade by EOD.**
+- **Shipped (3 parallel lanes, all typecheck-green together; new tests green):**
+  - **L1 pure assembler v2** (`packages/script-studio`, +39 tests = 64 total): scene-plan Zod schema +
+    zero-key heuristic fallback; `assemblePlannedProject` emits VO + b-roll (round-robin + trim/loop fit) +
+    small lower-third caption + big word-by-word caption sequence + `CaptionBlock` track + music with
+    **parity-safe duck via `volumeEnvelope` keyframes** (no `sidechaincompress`). Pure/deterministic;
+    `validateProject()` + AC-6 export-style-subset guards pass. `arrangeAssets()` for the upload step.
+  - **L2 AI backend** (`apps/api`+`render-worker`): `/api/v1/script/{plan,generate,arrange}`; Groq
+    `gpt-oss-20b` strict-JSON planner with heuristic fallback (never 5xx); **kokoro-js** TTS (Node/CPU/q8,
+    no binary) behind a swappable `synthVoice` seam (Piper drop-in); VO/music become real assets via the
+    UNCHANGED media pipeline; bounded `script` BullMQ job (concurrency 1); `script_manifests` table (mig 0002);
+    3 bundled CC0 music beds.
+  - **L3 Script Studio UI** (`apps/web`, route `/script`): paste → editable plan review (shows the shot
+    each scene needs + dual captions + music toggle) → generate → opens in editor → Auto-arrange upload tray.
+    16/16 route tests green; brand-clean (amber reserved for Export).
+- **Atlas integration:** whole-monorepo typecheck green; lockfile reconciled; voice ids aligned (L3 picker ⇄
+  kokoro); pure core chain proven live (plan→assemble→validate→arrange→validate, valid projects).
+- **In-flight:** audible-dynamic duck (intro/outro music swell so ducking isn't a flat bed) — Reel.
+- **Blocked/needs CEO:** (1) **Groq API key** (free; heuristic floor runs key-free until then); (2) ack the
+  parity-safe-dynamic ducking substitution (vs runtime `sidechaincompress`); (3) FYI — **FreePD is shut down**;
+  using our own CC0-dedicated beds (swap human-composed CC0 anytime, no code change).
+- **Not yet run:** full live stack (DB+Redis+MinIO+worker+warmed kokoro model+ffprobe) for a real
+  `/generate`→export — that's the CEO's to run with services up; exact steps handed over.
+
 ### 2026-06-14 (cont.) — 🆚 Canva parity sweep — FULL BUILD-OUT (waves 1–4 shipped; remaining = gates)
 - **CEO directive:** "continue till you fill every gap from Canva, don't stop." Ran the persona fleet as a
   continuous build loop, escalating only true gates. **7 commits**, each typecheck-green + verified at the

@@ -733,7 +733,21 @@ function buildTextOverlayStage(
  * downloads originals from S3 (§10.2). This keeps the graph builder side-effect free
  * and unit-testable (MVP_Scope §3.8: "Built FIRST as a headless, unit-testable module").
  */
-export function buildExportCommand(project: Project, settings: ExportSettings): BuildResult {
+/**
+ * Per-asset media kind, supplied by the caller (the worker infers it from the asset's
+ * stored file extension; the preview from the decoded element). The Project document
+ * references assets by id only, so the export needs this to know which inputs are STILL
+ * IMAGES — those must be `-loop`ed to fill their clip window (a bare `-i image.png` is a
+ * single frame → black for the rest of the window, and a frozen draw-on reveal). Absent
+ * ⇒ every clip is treated as timed media (`-ss/-to`), the historical behaviour.
+ */
+export type AssetKind = "image" | "video" | "audio";
+
+export function buildExportCommand(
+  project: Project,
+  settings: ExportSettings,
+  assetKinds?: ReadonlyMap<string, AssetKind>,
+): BuildResult {
   const { resolution, fps, crf } = settings;
   const outW = resolution.w;
   const outH = resolution.h;
@@ -757,13 +771,22 @@ export function buildExportCommand(project: Project, settings: ExportSettings): 
 
   const declareClipInput = (clip: Clip): number => {
     const index = inputs.length;
+    // STILL IMAGE: loop it to fill the clip's timeline window so it produces a
+    // continuous stream (a bare `-i image.png` is one frame). This also gives the
+    // per-clip `geq` a real advancing `T`, which is what the draw-on reveal needs.
+    // `-t` = the clip's on-timeline duration; no `-ss/-to` (an image has no source
+    // timeline to seek). `-framerate` matches the output so frame timing is clean.
+    const isImage = assetKinds?.get(clip.sourceAssetId) === "image";
+    const preArgs = isImage
+      ? ["-loop", "1", "-framerate", String(fps), "-t", msToSec(clip.endOnTimeline - clip.startOnTimeline)]
+      : // Accurate trim: -ss = trimIn, -to = trimOut, both from SOURCE asset origin.
+        ["-ss", msToSec(clip.trimIn), "-to", msToSec(clip.trimOut)];
     inputs.push({
       index,
       kind: "clip",
       assetId: clip.sourceAssetId,
       clipId: clip.id,
-      // Accurate trim: -ss = trimIn, -to = trimOut, both from SOURCE asset origin.
-      preArgs: ["-ss", msToSec(clip.trimIn), "-to", msToSec(clip.trimOut)],
+      preArgs,
       path: `asset:${clip.sourceAssetId}`,
     });
     clipInputIndex.set(clip.id, index);
@@ -847,24 +870,37 @@ export function buildExportCommand(project: Project, settings: ExportSettings): 
       //     keyframes we drive the alpha PLANE via a `T`-driven `geq` EXPRESSION that
       //     reproduces the SAME piecewise curve the preview samples (clipAlpha), so
       //     animated opacity matches preview frame-for-frame.
-      const alpha = clipAlpha(clip);
-      if (alpha) {
-        if (alpha.kind === "const") {
-          // CONSTANT alpha: colorchannelmixer (byte-compatible with the pre-keyframe
-          // graph — its `aa` is a static double, which is all a constant needs).
-          steps.push("format=rgba", `colorchannelmixer=aa=${num4(alpha.alpha)}`);
-        } else {
-          // TIME-VARYING alpha: colorchannelmixer's `aa` is NOT expression-evaluated,
-          // so a per-frame curve must drive the ALPHA PLANE directly. `geq` is the one
-          // filter whose plane outputs accept the time variable `T` (seconds). On
-          // yuva420p we rewrite only the alpha plane (`a`) from the shared curve and
-          // pass luma/chroma through untouched, so colour is unchanged and only opacity
-          // animates — reproducing the preview's `globalAlpha` ramp frame-exactly.
-          // `alpha.expr` is in 0..1; geq's alpha plane is 0..255.
-          steps.push(
-            "format=yuva420p",
-            `geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='255*(${alpha.expr})'`,
-          );
+      // Whiteboard "draw-on" reveal (Phase 1: mutually exclusive with opacity). A
+      // POSITION-dependent alpha edge on yuva420p — the SAME geq/alpha-plane mechanism
+      // as opacity below, but spatial: the revealed region keeps the source alpha and
+      // the rest is transparent, the edge advancing via the shared eased progress. The
+      // preview clips a growing rect from the identical progress → matches frame-exact.
+      const reveal = clipRevealExpr(clip);
+      if (reveal) {
+        steps.push(
+          "format=yuva420p",
+          `geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='${reveal}'`,
+        );
+      } else {
+        const alpha = clipAlpha(clip);
+        if (alpha) {
+          if (alpha.kind === "const") {
+            // CONSTANT alpha: colorchannelmixer (byte-compatible with the pre-keyframe
+            // graph — its `aa` is a static double, which is all a constant needs).
+            steps.push("format=rgba", `colorchannelmixer=aa=${num4(alpha.alpha)}`);
+          } else {
+            // TIME-VARYING alpha: colorchannelmixer's `aa` is NOT expression-evaluated,
+            // so a per-frame curve must drive the ALPHA PLANE directly. `geq` is the one
+            // filter whose plane outputs accept the time variable `T` (seconds). On
+            // yuva420p we rewrite only the alpha plane (`a`) from the shared curve and
+            // pass luma/chroma through untouched, so colour is unchanged and only opacity
+            // animates — reproducing the preview's `globalAlpha` ramp frame-exactly.
+            // `alpha.expr` is in 0..1; geq's alpha plane is 0..255.
+            steps.push(
+              "format=yuva420p",
+              `geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='255*(${alpha.expr})'`,
+            );
+          }
         }
       }
 
@@ -1314,6 +1350,36 @@ export function sampleNumericKeyframes(kfs: NumKeyframe[], timeMs: number, fallb
 /** Stable, minimal decimal (mirrors the other emitters here). */
 function num4(n: number): string {
   return n.toFixed(4).replace(/\.?0+$/, "") || "0";
+}
+
+/**
+ * Whiteboard "draw-on" reveal → the alpha-plane `a=` expression for a `geq` (or null
+ * when the clip has no reveal / a non-positive duration, so the stage is omitted and
+ * the graph is byte-identical). The revealed region keeps the source alpha
+ * (`alpha(X,Y)`), the rest is transparent (0). The reveal fraction `P(T)` ramps 0→1
+ * over `durationMs` of clip-local time `T` (seconds, post-§2a setpts) via the SAME
+ * `easingExprFor` twin the preview's `_easedProgress` uses, so preview == export.
+ * Phase 1 ships `direction:"top"` + linear, but all four directions are emitted.
+ */
+function clipRevealExpr(clip: Clip): string | null {
+  const rw = clip.revealWipe;
+  if (!rw) return null;
+  const durSec = rw.durationMs / 1000;
+  if (!(durSec > 0)) return null; // zero/negative → clip shows fully (no reveal stage)
+  // Clip-local time fraction; easingExprFor clamps to [0,1] and applies the curve.
+  const u = `(T/${num4(durSec)})`;
+  const P = easingExprFor(rw.easing ?? "linear", u, 0, 1); // eased reveal fraction 0..1
+  switch (rw.direction) {
+    case "bottom":
+      return `if(gte(Y,H*(1-(${P}))),alpha(X,Y),0)`;
+    case "left":
+      return `if(lt(X,W*(${P})),alpha(X,Y),0)`;
+    case "right":
+      return `if(gte(X,W*(1-(${P}))),alpha(X,Y),0)`;
+    case "top":
+    default:
+      return `if(lt(Y,H*(${P})),alpha(X,Y),0)`;
+  }
 }
 
 /**

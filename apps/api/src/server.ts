@@ -35,6 +35,8 @@ import { assetRoutes } from './routes/assets.js';
 import { exportRoutes } from './routes/exports.js';
 import { authRoutes } from './routes/auth.js';
 import { versionRoutes } from './routes/versions.js';
+import { scriptRoutes } from './routes/script.js';
+import { createScriptWorker } from './script/worker.js';
 import { registerAuthDecorator, resolveJwtSecret } from './auth/plugin.js';
 import { registerWs, broadcast } from './ws.js';
 import { redisClient } from './queues.js';
@@ -156,6 +158,24 @@ export async function buildServer(): Promise<FastifyInstance> {
   await app.register(versionRoutes, { prefix: `${API_PREFIX}/projects` });
   await app.register(assetRoutes, { prefix: `${API_PREFIX}/assets` });
   await app.register(exportRoutes, { prefix: `${API_PREFIX}/exports` });
+  // Script Studio v2 (Contract C): /plan, /generate, /arrange.
+  await app.register(scriptRoutes, { prefix: `${API_PREFIX}/script` });
+
+  // Boot the bounded `script` worker IN-PROCESS (concurrency 1). It writes the
+  // project + manifest rows (Postgres) and originals (S3) — both API-owned — so it
+  // runs here rather than in render-worker. Short scripts run inline in the route;
+  // this only handles the long-script async path. Guarded so tests that build the
+  // app without Redis don't spin a live worker.
+  if (process.env['SCRIPT_WORKER_DISABLED'] !== 'true') {
+    try {
+      const scriptWorker = createScriptWorker();
+      app.addHook('onClose', async () => {
+        await scriptWorker.close();
+      });
+    } catch (err) {
+      app.log.warn({ err }, 'script worker failed to start; long-script path disabled');
+    }
+  }
 
   // ── Sentry error capture ───────────────────────────────────────────────────
   // Fastify's setErrorHandler is the single funnel for all unhandled route
@@ -209,6 +229,11 @@ const WORKER_CHANNELS = [
   'export:progress',
   'export:complete',
   'export:failed',
+  // Script Studio v2 long-script job events. The script worker persists the project
+  // + manifest itself, so these are relay-only (broadcast to the workspace WS room).
+  'script:progress',
+  'script:complete',
+  'script:failed',
 ] as const;
 
 interface WorkerEvent {

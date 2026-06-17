@@ -58,6 +58,20 @@ export const projectVersions = pgTable('project_versions', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 
+// Script Studio v2 sidecar manifests. The assembler emits a §18 Project + a sidecar
+// ScriptManifest (provenance + per-scene windows + element id map). ProjectSchema is
+// .strict(), so the manifest is NEVER inlined into the document — it is persisted here
+// keyed by project id. Arrange loads the scene windows from `manifest` to re-place
+// uploaded assets without re-planning. workspace_id is the authenticated userId.
+export const scriptManifests = pgTable('script_manifests', {
+  projectId: text('project_id').primaryKey(),
+  workspaceId: text('workspace_id').notNull(),
+  manifest: jsonb('manifest').notNull(),
+  plan: jsonb('plan').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
 export const exportJobs = pgTable('export_jobs', {
   id: text('id').primaryKey(),
   projectId: text('project_id').notNull(),

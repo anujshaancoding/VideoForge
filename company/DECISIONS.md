@@ -8,6 +8,36 @@ Gate types: 💰 money · 🧭 scope · 🚀 release/publish · ⚠️ irreversi
 
 ## 🔴 Open — needs CEO decision
 
+### 2026-06-15 🧭 Script Studio v2 — "auto video from a script" (CEO-directed, building today)
+- **Raised by:** Atlas (CEO asked for end-to-end auto-video-from-script TODAY).
+- **Scope (CEO-greenlit live, 2026-06-15):** paste script → **Groq LLM** scene-plan that *names the
+  video/photo each scene needs* (suggestion only, no auto-fetch) → **auto TTS voice-over** → **dual
+  captions** (small bottom + big full-screen word-by-word) → user uploads footage → **auto-place +
+  retime to the spoken words** → **auto background music with ducking**. Target = **full chain,
+  demo-grade by EOD** (hardening/golden gates follow over 1–2 days). Builds on the already-approved
+  pure assembler (`packages/script-studio`, decided 2026-06-05); v2 adds the AI content layer with
+  **zero `project-schema ↔ ffmpeg-graph` change** (all AI output mapped into validated §18 by the
+  pure assembler — invariant intact). Two research docs: `docs/Script_Studio_v2_Research_{Product,Tech}.md`.
+- **Stack (Atlas decided, $0 / CPU-bounded):** planner = Groq `openai/gpt-oss-20b` strict-JSON,
+  with the existing pure `segment.ts` heuristic as a **zero-key always-on fallback** (feature never
+  hard-fails); TTS = Piper/Kokoro (CEO-approved 06-05) → real WAV asset through the existing media
+  pipeline; captions timing = even-distribution now, **aeneas** forced-alignment fast-follow; music =
+  bundled **FreePD CC0** (no attribution, Ward-approved).
+- **⚠️ Ducking — Atlas refinement of the CEO pick (needs ack):** CEO chose *true dynamic ducking*.
+  Both research streams independently warn runtime FFmpeg `sidechaincompress` **breaks preview==export**
+  (WebAudio can't replicate its envelope) — it's the single highest audio-parity risk and was the one
+  thing the spec deferred. **Atlas is delivering the CEO's *intent* (music that dynamically dips around
+  the voice) the parity-safe way: scheduled volume-envelope keyframes computed from the VO timings** —
+  it dips live during speech and lifts in gaps, but it's just keyframed volume the exporter already
+  renders identically, so WYCIWYG holds. **True `sidechaincompress` remains available as a golden-gated
+  fast-follow if you want the exact compressor curve.** Proceeding with parity-safe dynamic unless you object.
+- **🔑 Only true blocker = a Groq API key** (free, console.groq.com). CEO chose "I'll paste a key now."
+  Until it lands, the heuristic fallback runs the whole flow key-free. Store in gitignored
+  `company/ACCESS.md` + `.env` (`GROQ_API_KEY`).
+- **Decision:** ✅ greenlit & building (Anuj, 2026-06-15). Open sub-items: (1) paste Groq key; (2) ack
+  the parity-safe-dynamic ducking substitution above.
+
+
 ### 2026-06-14 ⚖️/🧭 CC0 library — external content sourcing + license vetting
 - **Raised by:** Atlas (building the CEO-greenlit CC0 stock+music library)
 - **Context:** The library splits into (1) **engineering** — manifest format + Stock/Audio/Elements panel UI

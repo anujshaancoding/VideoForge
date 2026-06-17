@@ -20,4 +20,5 @@ export type {
   BuildResult,
   TextFileSpec,
   FontSpec,
+  AssetKind,
 } from "./buildFilterComplex.js";

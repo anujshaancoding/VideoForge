@@ -27,6 +27,13 @@ export const mediaQueue = new Queue('media', {
 export const renderQueue = new Queue('render', {
   connection: redisClient as unknown as never,
 });
+// Script Studio v2 — bounded async path for LONG scripts (Contract C #3). Short
+// scripts (≤ ~8 scenes) run inline in the route; longer ones enqueue here and a
+// single-concurrency `script` worker (apps/api/src/script/worker.ts) runs the SAME
+// orchestration off the request thread, emitting `script:progress`/`script:complete`.
+export const scriptQueue = new Queue('script', {
+  connection: redisClient as unknown as never,
+});
 
 // ── Job data shapes ──────────────────────────────────────────────────────────
 
@@ -36,6 +43,21 @@ export interface MediaJobData {
   s3KeyOriginal: string;
   contentType: string;
   durationMs?: number;
+}
+
+export interface ScriptJobData {
+  /** The owning workspace (== authenticated userId). */
+  workspaceId: string;
+  /** Project title. */
+  title: string;
+  /** The reviewed/edited scene plan (Contract A). */
+  plan: unknown;
+  /** Caller-supplied voice id. */
+  voiceId: string;
+  /** Whether to attach a bundled CC0 music bed. */
+  withMusic: boolean;
+  /** Sketch style to auto-illustrate scenes with ('pen'|'graphite'|'color'), or null. */
+  sketchStyle?: string | null;
 }
 
 export interface RenderJobData {

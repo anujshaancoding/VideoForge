@@ -236,7 +236,28 @@ export interface Clip {
    */
   fit?: ClipFit;
 
+  /**
+   * Whiteboard "draw-on" reveal: the clip's pixels appear progressively over
+   * `durationMs` (from the clip's start), then HOLD fully revealed. ABSENT ⇒ the clip
+   * shows fully from frame 0 (historical default; existing projects/exports stay
+   * byte-identical). The preview (a time-varying clip rect) and the FFmpeg export (a
+   * position-dependent alpha edge via `geq`) BOTH compute the reveal fraction from the
+   * SAME clip-local progress + shared easing, so the reveal looks identical in the
+   * export — the WYCIWYG invariant holds. Phase 1: `direction:"top"`, `easing:"linear"`.
+   */
+  revealWipe?: RevealWipe | null;
+
   // NOTE: transitions live in Project.transitions[], NOT here (finding E-6).
+}
+
+/** Progressive "draw-on" reveal of a clip's pixels (whiteboard-animation effect). */
+export interface RevealWipe {
+  /** Edge the reveal advances FROM: "top" reveals top→bottom, "left" reveals L→R, etc. */
+  direction: "top" | "bottom" | "left" | "right";
+  /** Reveal completes this many ms after the clip starts; pixels HOLD after. Integer ms. */
+  durationMs: Millis;
+  /** Eased reveal curve (reuses the Keyframe easings). Defaults to "linear". */
+  easing?: Keyframe["easing"];
 }
 
 /**

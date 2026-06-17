@@ -1,0 +1,2 @@
+- [Script Studio sketch images](script-studio-sketch-images.md) — $0 script→sketch-video: Draw Things base image + sharp sketch filter, SHIPPED into /generate + /sketch (default pen)
+- [Script Studio proof harness](script-studio-proof-harness.md) — where the /tmp/sketch-proof OpenCV reference + sample outputs live

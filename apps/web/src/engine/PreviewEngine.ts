@@ -486,6 +486,19 @@ export class PreviewEngine {
         ctx.rect(rx, ry, rw, rh);
         ctx.clip();
       }
+      // Whiteboard "draw-on" reveal — clip drawing to the progressively-revealed
+      // region. Uses the SAME clip-local progress + easing as the export's geq alpha
+      // edge (clipRevealExpr), so the reveal matches frame-for-frame (WYCIWYG).
+      if (clip.revealWipe) {
+        const p = this._revealProgress(clip, playheadMs);
+        const dir = clip.revealWipe.direction;
+        ctx.beginPath();
+        if (dir === "bottom") ctx.rect(rx, ry + rh * (1 - p), rw, rh * p);
+        else if (dir === "left") ctx.rect(rx, ry, rw * p, rh);
+        else if (dir === "right") ctx.rect(rx + rw * (1 - p), ry, rw * p, rh);
+        else ctx.rect(rx, ry, rw, rh * p); // "top" (default): reveal top→bottom
+        ctx.clip();
+      }
       // Mirror around the rect centre (matches export hflip/vflip).
       if (clip.flipH || clip.flipV) {
         const mx = rx + rw / 2;
@@ -530,6 +543,19 @@ export class PreviewEngine {
     if (kfs.length === 0) return 100;
     const v = this._sampleKeyframes(kfs, playheadMs, 100);
     return Math.max(0, Math.min(100, v));
+  }
+
+  /**
+   * Whiteboard "draw-on" reveal fraction (0..1) at `playheadMs`. Clip-local time over
+   * `durationMs`, through the SHARED `_easedProgress` twin — the exact fraction the
+   * export's `clipRevealExpr` `geq` edge uses, so the reveal matches frame-for-frame.
+   * No reveal / non-positive duration → 1 (fully shown).
+   */
+  private _revealProgress(clip: Clip, playheadMs: number): number {
+    const rw = clip.revealWipe;
+    if (!rw || !(rw.durationMs > 0)) return 1;
+    const u = (playheadMs - clip.startOnTimeline) / rw.durationMs;
+    return this._easedProgress(u, rw.easing ?? "linear");
   }
 
   /** Numeric, time-ordered keyframes for a property (drops non-numeric). Twin of the export. */

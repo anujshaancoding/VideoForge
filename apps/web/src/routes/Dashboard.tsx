@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { Sparkles } from "lucide-react";
 import {
   deleteProject,
   duplicateProject,
@@ -409,10 +410,21 @@ export default function Dashboard() {
             <p className="mt-3 text-base text-vf-text-secondary">
               Import → arrange → export — usually under 10 minutes. What you cut is what you get.
             </p>
-            <div className="mt-8">
+            <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
               {/* Non-amber: amber is reserved for the single Export CTA + brand (§2.3). */}
               <Button variant="secondary" size="lg" onClick={() => navigate("/new")} data-testid="new-project-btn">
                 + New project
+              </Button>
+              {/* Script Studio entry — selection sky-blue, never amber. */}
+              <Button
+                variant="secondary"
+                size="lg"
+                className="border-vf-selection/60 text-vf-text-primary"
+                leadingIcon={<Sparkles className="h-4 w-4 text-vf-selection" aria-hidden="true" />}
+                onClick={() => navigate("/script")}
+                data-testid="script-studio-btn"
+              >
+                Start from a script
               </Button>
             </div>
           </div>
@@ -420,10 +432,22 @@ export default function Dashboard() {
           <>
             <div className="mb-6 flex items-center justify-between">
               <h1 className="text-xl font-bold text-vf-text-primary">Your projects</h1>
-              {/* Non-amber: amber is reserved for the single Export CTA + brand (§2.3). */}
-              <Button variant="secondary" onClick={() => navigate("/new")} data-testid="new-project-btn">
-                + New
-              </Button>
+              <div className="flex items-center gap-2">
+                {/* Script Studio entry — selection sky-blue, never amber. */}
+                <Button
+                  variant="secondary"
+                  className="border-vf-selection/60"
+                  leadingIcon={<Sparkles className="h-4 w-4 text-vf-selection" aria-hidden="true" />}
+                  onClick={() => navigate("/script")}
+                  data-testid="script-studio-btn"
+                >
+                  From a script
+                </Button>
+                {/* Non-amber: amber is reserved for the single Export CTA + brand (§2.3). */}
+                <Button variant="secondary" onClick={() => navigate("/new")} data-testid="new-project-btn">
+                  + New
+                </Button>
+              </div>
             </div>
             <ul
               role="list"

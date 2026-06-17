@@ -1,0 +1,12 @@
+# Local dev override (not committed): publish Postgres on an ALTERNATE host port so it
+# doesn't collide with an SSH tunnel that has grabbed loopback :5432. The Docker DB is
+# reachable at localhost:5544; containers still use the `postgres:5432` service DNS.
+services:
+  postgres:
+    ports:
+      - "5544:5432"
+  render-worker:
+    environment:
+      # The worker's ffmpeg is <7.0, which lacks drawtext `text_align`. Omit it so the
+      # caption filtergraph initialises (single-line captions render identically).
+      FFMPEG_DISABLE_TEXT_ALIGN: "1"

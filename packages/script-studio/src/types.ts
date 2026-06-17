@@ -14,6 +14,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import type { Project } from "@videoforge/project-schema";
+import type { BrollSuggestion } from "./plan.js";
 
 /**
  * One assembled segment, mapping a source `ScriptSegment` to the generated
@@ -98,4 +99,76 @@ export interface AssembledScript {
   /** MUST pass validateProject() — asserted in CI. */
   document: Project;
   manifest: ScriptManifest;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Script Studio v2 — Contract B sidecar (planned-project manifest).
+//
+// `assemblePlannedProject` emits a richer document (VO + b-roll video + dual
+// captions + music) and a `PlannedScriptManifest` that stores, per scene, the
+// source b-roll suggestion + every emitted element id + the scene's probed window.
+// This lets the API's /arrange re-place uploaded assets onto the EXISTING scene
+// windows without re-planning or re-probing. Never persisted inline.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Per-scene provenance + element-id map for a planned assembly. All times are the
+ * scene's PROBED VO window (the source of truth). Element ids resolve against the
+ * emitted `Project`; `videoClipIds` is empty when no b-roll asset filled the scene.
+ */
+export interface PlannedSceneMapping {
+  /** Source scene ordinal (matches PlannedScene order / SceneVo.sceneIndex). */
+  sceneIndex: number;
+  /** The spoken text (mirrors the VO clip / caption block text). */
+  voiceoverText: string;
+  /** [startMs, endMs] probed window on the timeline this scene occupies. */
+  startMs: number;
+  endMs: number;
+  /** Caller-supplied VO asset id this scene's voice clip references. */
+  voiceAssetId: string;
+  /** Probed VO duration (ms) for this scene — the source of timing truth. */
+  durationMs: number;
+  /** The voice-over Clip.id emitted on the voiceover track. */
+  voiceClipId: string;
+  /** The b-roll video Clip.id(s) emitted on the video track for this window (round-robin / loop fit). Empty ⇒ gap. */
+  videoClipIds: string[];
+  /** The lower-third small-caption TextOverlay.id, or null when smallCaption is empty. */
+  smallCaptionOverlayId: string | null;
+  /** The full-screen big-caption TextOverlay.id sequence (one per ~3-word chunk). */
+  bigCaptionOverlayIds: string[];
+  /** The CaptionBlock.id emitted on the caption track (sidecar SRT/VTT source). */
+  captionBlockId: string;
+  /** The source b-roll suggestion this scene was planned with (for re-arrange / UI). */
+  brollSuggestion: BrollSuggestion;
+}
+
+/** Sidecar metadata for a Script-Studio-v2 planned project. Never persisted inline. */
+export interface PlannedScriptManifest {
+  /** Stable manifest id (UUID v4), derived from the assembly seed. */
+  id: string;
+  /** Schema/shape version of the manifest itself. */
+  manifestVersion: number;
+  /** The id of the document this manifest describes. */
+  projectId: string;
+  /** Caller-supplied voice id (opaque). */
+  voiceId: string;
+  /** The scene style every text card was authored with. */
+  sceneStyle: ScriptSceneStyle;
+  /** Per-scene provenance + element id map + probed windows, in scene order. */
+  scenes: PlannedSceneMapping[];
+  /** The b-roll video track id (where /arrange re-places uploaded assets). */
+  videoTrackId: string;
+  /** The music Clip.id, or null when no music bed was added. */
+  musicClipId: string | null;
+  /** The music track id, or null when no music bed was added. */
+  musicTrackId: string | null;
+  /** Provenance for bundled FreePD CC0 music (no attribution legally required; logged anyway). */
+  attributions: ScriptAttribution[];
+}
+
+/** `assemblePlannedProject`'s return shape: a §18 document + its planned sidecar. */
+export interface AssembledPlannedScript {
+  /** MUST pass validateProject() — asserted in CI. */
+  document: Project;
+  manifest: PlannedScriptManifest;
 }

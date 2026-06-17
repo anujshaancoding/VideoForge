@@ -24,7 +24,8 @@
   },
   "dependencies": {
     "@videoforge/project-schema": "workspace:*",
-    "@videoforge/templates": "workspace:*"
+    "@videoforge/templates": "workspace:*",
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "@videoforge/config": "workspace:*",

@@ -19,7 +19,46 @@ vi.mock('../s3.js', () => ({
   BUCKET_EXPORTS: 'vf-exports',
 }));
 
-import { substituteFilterTokens } from '../worker.js';
+import { substituteFilterTokens, stripTextAlign, assetKindsFromS3Keys } from '../worker.js';
+
+describe('assetKindsFromS3Keys — infer media kind from stored extension', () => {
+  it('classifies image / audio / video by original-key extension', () => {
+    const kinds = assetKindsFromS3Keys({
+      img: { original: 'img/original.png' },
+      vo: { original: 'vo/original.wav' },
+      vid: { original: 'vid/original.mp4' },
+      jpg: { original: 'a/original.JPG' }, // case-insensitive
+    });
+    expect(kinds.get('img')).toBe('image');
+    expect(kinds.get('vo')).toBe('audio');
+    expect(kinds.get('vid')).toBe('video');
+    expect(kinds.get('jpg')).toBe('image');
+  });
+
+  it('handles undefined / missing keys without throwing', () => {
+    expect(assetKindsFromS3Keys(undefined).size).toBe(0);
+    expect(assetKindsFromS3Keys({ a: {} }).get('a')).toBe('video'); // unknown → video
+  });
+});
+
+describe('stripTextAlign — drawtext ffmpeg<7 compat shim', () => {
+  it('removes text_align=<X>: only inside the -filter_complex arg', () => {
+    const args = [
+      '-filter_complex',
+      "[0]drawtext=fontsize=44:line_spacing=9:text_align=C:expansion=none[v];[v]drawtext=text_align=R:enable=1[o]",
+      '-map', '[o]',
+    ];
+    const out = stripTextAlign(args);
+    expect(out[1]).not.toContain('text_align');
+    expect(out[1]).toContain('line_spacing=9:expansion=none'); // neighbours preserved
+    expect(out[3]).toBe('[o]'); // non-filter args untouched
+  });
+
+  it('is a no-op when there is no text_align', () => {
+    const args = ['-filter_complex', '[0]scale=1080:1920[o]', '-map', '[o]'];
+    expect(stripTextAlign(args)).toEqual(args);
+  });
+});
 
 describe('substituteFilterTokens — in-filter sentinel rewrite', () => {
   it('replaces font + overlay-text sentinels ONLY inside the -filter_complex value', () => {

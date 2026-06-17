@@ -17,6 +17,7 @@ import {
   projectDurationMs,
   type ExportSettings,
   type BuildResult,
+  type AssetKind,
 } from '@videoforge/ffmpeg-graph';
 import { spawn, execFile } from 'node:child_process';
 import { writeFile } from 'node:fs/promises';
@@ -308,6 +309,37 @@ export function substituteFilterTokens(
 }
 
 /**
+ * Infer each asset's media kind from its stored original-file extension, for the pure
+ * builder's image-loop logic. The worker has the S3 keys (e.g. `<id>/original.png`);
+ * the ffmpeg-graph package stays free of asset metadata. Pure + exported for testing.
+ */
+const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'tiff']);
+const AUDIO_EXTS = new Set(['wav', 'mp3', 'm4a', 'aac', 'flac', 'ogg', 'opus']);
+export function assetKindsFromS3Keys(
+  s3Keys: RenderJobData['s3Keys'] | undefined,
+): Map<string, AssetKind> {
+  const kinds = new Map<string, AssetKind>();
+  for (const [assetId, keys] of Object.entries(s3Keys ?? {})) {
+    const ext = (keys?.original ?? '').toLowerCase().split('.').pop() ?? '';
+    kinds.set(assetId, IMAGE_EXTS.has(ext) ? 'image' : AUDIO_EXTS.has(ext) ? 'audio' : 'video');
+  }
+  return kinds;
+}
+
+/**
+ * Remove the `text_align=<X>:` drawtext option from the `-filter_complex` arg. That
+ * option is ffmpeg 7.0+; on older ffmpeg it aborts the filtergraph. Applied only when
+ * the running ffmpeg lacks it (env-gated by the caller). Keeps @videoforge/ffmpeg-graph
+ * pure — the compat shim lives here, in the impure worker. Pure + exported for testing.
+ */
+export function stripTextAlign(args: string[]): string[] {
+  return args.map((arg, i) => {
+    if (i === 0 || args[i - 1] !== '-filter_complex') return arg;
+    return arg.replace(/text_align=[A-Za-z]+:/g, '');
+  });
+}
+
+/**
  * Rewrite the placeholder tokens in `args` with real local file paths:
  *   `asset:<assetId>`          → local downloaded path                 (whole-arg `-i` value)
  *   `watermark:vf`             → path to bundled watermark PNG          (whole-arg `-i` value)
@@ -521,7 +553,12 @@ export async function processRenderJob(
       ...DEFAULT_EXPORT_SETTINGS,
       ...(job.data.settings ?? {}),
     };
-    const buildResult: BuildResult = buildExportCommand(project, settings);
+    // Tell the (pure) builder which assets are STILL IMAGES so it can `-loop` them to
+    // fill their clip window (a bare `-i image.png` is one frame → black + frozen
+    // reveal). Inferred from each asset's stored file extension — the worker has the
+    // S3 keys; the ffmpeg-graph package stays asset-metadata-free.
+    const assetKinds = assetKindsFromS3Keys(job.data.s3Keys);
+    const buildResult: BuildResult = buildExportCommand(project, settings, assetKinds);
 
     // 3. Resolve asset S3 keys → local temp paths.
     const assetPaths = await resolveAssets(buildResult, job.data.s3Keys, exportId);
@@ -572,7 +609,16 @@ export async function processRenderJob(
     // 6. Replace the placeholder output filename "out.mp4" with an absolute temp path.
     const outputPath = join(tmpdir(), `vf-export-${exportId}.mp4`);
     tempFiles.push(outputPath);
-    const finalArgs = resolvedArgs.map((arg) => (arg === 'out.mp4' ? outputPath : arg));
+    let finalArgs = resolvedArgs.map((arg) => (arg === 'out.mp4' ? outputPath : arg));
+    // ffmpeg compat: `text_align` is a drawtext option added in ffmpeg 7.0. This image
+    // ships an older ffmpeg, where it aborts the whole filtergraph. When FFMPEG lacks
+    // it (flagged via env), strip the `text_align=<X>:` token from the -filter_complex
+    // arg here — keeping @videoforge/ffmpeg-graph pure. Single-line captions render
+    // identically (x-centering already centres them); only multi-line blocks lose
+    // inter-line centering. Remove this shim once the image pins ffmpeg ≥ 7.0.
+    if (process.env['FFMPEG_DISABLE_TEXT_ALIGN'] === '1') {
+      finalArgs = stripTextAlign(finalArgs);
+    }
 
     console.info(
       `[render-worker] export ${exportId} — spawning: ${FFMPEG_PATH} ${finalArgs.slice(0, 8).join(' ')} ...`,

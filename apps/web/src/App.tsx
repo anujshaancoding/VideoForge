@@ -4,6 +4,7 @@ import { isSupportedBrowser } from "./lib/browser.js";
 import BrowserGate from "./routes/BrowserGate.js";
 import Dashboard from "./routes/Dashboard.js";
 import NewProjectModal from "./routes/NewProjectModal.js";
+import ScriptStudio from "./routes/ScriptStudio.js";
 import Editor from "./routes/Editor.js";
 import { LoginScreen, SignupScreen } from "./routes/AuthScreen.js";
 import { EditorErrorBoundary } from "./components/editor/index.js";
@@ -93,6 +94,15 @@ function AuthedRoutes() {
           <RequireAuth>
             <Dashboard />
             <NewProjectModal />
+          </RequireAuth>
+        }
+      />
+      {/* Script Studio v2 — paste a script → plan → generate → open editor (§ Contract D). */}
+      <Route
+        path="/script"
+        element={
+          <RequireAuth>
+            <ScriptStudio />
           </RequireAuth>
         }
       />
