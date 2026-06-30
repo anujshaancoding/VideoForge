@@ -23,8 +23,10 @@ Vercel was chosen over Cloudflare Pages for three concrete reasons:
 3. **Free Hobby tier covers the MVP:** unlimited static bandwidth, automatic HTTPS, preview
    deployments per branch, no credit card required for the first project.
 
-The config lives at `/apps/web/vercel.json`. The Vercel project root must be set to the repo root
-(not `apps/web`) so pnpm can resolve workspace packages.
+The config lives at `/vercel.json` (repo root). The Vercel project root MUST be the repo root
+(not `apps/web`) — Vercel reads `vercel.json` from the project root, and its paths
+(`outputDirectory: apps/web/dist`, the `pnpm --filter` build) are repo-root-relative so pnpm can
+resolve workspace packages.
 
 ### Build facts
 
@@ -68,7 +70,7 @@ rule or direct-link navigation will 404.
    command).
 4. Confirm root directory is the repo root (`.`), NOT `apps/web`.
 5. Add the three environment variables above (at minimum `VITE_API_BASE_URL` and `VITE_WS_URL`).
-6. Deploy. Vercel reads `apps/web/vercel.json` automatically.
+6. Deploy. Vercel reads the repo-root `vercel.json` automatically.
 7. On success: confirm `/` loads the editor, `/editor/some-id` deep-links without 404, and
    `/assets/index-*.js` returns HTTP 200 with a long `Cache-Control` header.
 
