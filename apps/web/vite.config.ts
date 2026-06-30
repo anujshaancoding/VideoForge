@@ -9,6 +9,12 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: false,
+    fs: {
+      // Allow importing repo-root files (e.g. docs/USER_GUIDE.md?raw, rendered by
+      // the /docs page) in dev. `../..` from apps/web resolves to the monorepo root
+      // (matches Vite's default workspace-root allow; explicit here for clarity).
+      allow: ["../.."],
+    },
   },
   build: {
     target: "es2022",

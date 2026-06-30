@@ -1,13 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 
-// ROADMAP Now #9 — confirm the BrowserGate is wired into the ROOT of the app (not just
-// that the component renders in isolation). On an unsupported browser, App must render
-// the gate INSTEAD of any route/editor; on a supported one, it must render the router.
+// Confirm the BrowserGate is wired around the APP routes (dashboard/editor) — not
+// globally. After the landing-page work, the gate no longer replaces the whole app:
+// the public landing + docs must render on any browser, and only entering the app
+// (a logged-in user reaching the dashboard at "/") trips the gate on an unsupported
+// browser. We mock refreshSession so the boot-time session restore resolves to a
+// signed-in user, so "/" resolves to the (gated) dashboard rather than the landing.
 //
-// Wave 2: the supported-browser path now sits behind auth. We mock refreshSession so
-// the boot-time session restore resolves to a signed-in user — then the router renders
-// the Dashboard (root route) rather than /login.
+// The companion "renders on any browser" contract — that a LOGGED-OUT visitor sees
+// the marketing landing even on an unsupported browser — is covered in
+// Landing.public.test.tsx (a separate file, for clean auth-store module state).
 
 const { isSupportedBrowser } = vi.hoisted(() => ({ isSupportedBrowser: vi.fn() }));
 vi.mock("../lib/browser.js", async () => {
@@ -41,10 +44,14 @@ beforeEach(() => {
 });
 
 describe("App browser gate wiring", () => {
-  it("renders the BrowserGate (not the editor/router) on an unsupported browser", () => {
+  it("gates a logged-in user out of the app on an unsupported browser", async () => {
     isSupportedBrowser.mockReturnValue(false);
     render(<App />);
-    expect(screen.getByRole("alert")).toHaveTextContent(/works best in Chrome or Edge/i);
+    // Once the boot-time session restore resolves, "/" tries to render the dashboard,
+    // which is wrapped in the browser gate — so the gate's alert appears.
+    await waitFor(() =>
+      expect(screen.getByRole("alert")).toHaveTextContent(/works best in Chrome or Edge/i),
+    );
   });
 
   it("renders the app (not the gate) on a supported browser", async () => {

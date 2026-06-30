@@ -8,6 +8,37 @@ Gate types: 💰 money · 🧭 scope · 🚀 release/publish · ⚠️ irreversi
 
 ## 🔴 Open — needs CEO decision
 
+### 2026-06-30 ⚠️💰 Production hosting + recurring infra cost for backend
+- **Raised by:** Anchor (static-deploy prep; `docs/DEPLOY.md` has full detail)
+- **Gate type:** ⚠️ irreversible-infra (provisioning a VPS creates a recurring contract; DNS
+  changes are slow to revert) + 💰 money (first real recurring spend).
+- **Context:** The web frontend is ready to deploy as a static SPA on Vercel (free Hobby tier,
+  $0, config in `apps/web/vercel.json`, build verified locally). The backend is the spend
+  decision: `apps/api` (Fastify), `apps/render-worker` (BullMQ + FFmpeg 6.1.1), Postgres 16,
+  Redis 7, and S3-compatible object storage are all required for save/export/TTS pipeline. The
+  editor UI loads without a backend; save + render do not work without one.
+- **Options (full detail + tradeoffs in `docs/DEPLOY.md §2`):**
+  - **A) Single VPS + docker-compose (Hetzner CX22 ~$6/mo + R2 ~$0):** lowest cost, simplest
+    ops, single point of failure, FFmpeg renders on the same machine as the API. Recommended for
+    MVP/demo. Rollback: git pull + docker compose up; data in named volumes.
+  - **B) Managed Postgres + Redis + object store + one app server (~$0–$30/mo):** Neon/Supabase
+    free Postgres, Upstash free Redis, Cloudflare R2 free egress, app layer on Fly.io or a small
+    VPS. More modular; slightly more config glue. Scales each service independently.
+  - **C) Full PaaS — Railway / Render / Fly.io (~$15–$50/mo):** one dashboard, easy rollbacks,
+    highest per-unit cost at small scale. Suitable post-MVP when saving ops time is worth the
+    premium.
+- **Anchor recommendation:** **Option A for the demo/launch phase.** Total recurring spend:
+  ~$6/mo. No data-loss risk: VPS provider snapshots cover the Docker volumes. Single-server
+  render-worker is fine at `RENDER_CONCURRENCY=1` and fewer than ~2,000 exports/month (matches
+  the Ledger cost model in DECISIONS 2026-06-05). Step up to Option B when Postgres hits the
+  Neon free tier limit or when the render queue needs horizontal scaling.
+- **Deploy-ordering constraint to carry into execution (from DECISIONS 2026-06-27):** The render
+  worker is a baked image that hard-fails if the project schema is newer than its compiled
+  version. Always rebuild and push the worker image BEFORE or simultaneously with the API when
+  schema changes land. Document this in the runbook before the first production deploy.
+- **Decision:** ⏳ pending — CEO approval needed before provisioning any server or incurring
+  recurring spend. Anchor will execute Option A (or whichever option is chosen) once approved.
+
 ### 2026-06-27 🧭 Typewriter captions synced to voiceover — Script Studio (scope gate)
 - **Raised by:** Atlas (CEO asked for the script→video flow to end with "big typewriter caption
   animation popping on screen synced with voiceover"). Build-loop ran and **halted at Scope**.

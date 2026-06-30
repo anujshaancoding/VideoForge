@@ -5,6 +5,7 @@ import App from "./App.js";
 import "./styles/index.css";
 import "./styles/design.css";
 import "./styles/editor.css";
+import "./styles/landing.css";
 
 // ── Sentry (ROADMAP #10) ───────────────────────────────────────────────────
 // Initialise BEFORE the React render.  When VITE_SENTRY_DSN is blank/absent

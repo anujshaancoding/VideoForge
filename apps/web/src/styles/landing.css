@@ -1,0 +1,45 @@
+/* ─────────────────────────────────────────────────────────────────────────────
+ * Landing + Docs flourishes (public marketing surfaces only).
+ *
+ * The editor UI is built entirely from --vf-* tokens via Tailwind utilities; these
+ * few rules cover the handful of marketing effects Tailwind can't express cleanly
+ * (brand-gradient text, the hero glow, lift-on-hover cards). Amber (--vf-accent)
+ * stays reserved for the brand mark + the single primary CTA, per brand rules.
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+.vf-gradient-text {
+  background: var(--vf-brand-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+
+/* Soft amber/sky glow behind the hero — purely decorative, sits under content. */
+.vf-hero-glow {
+  background:
+    radial-gradient(55% 50% at 50% -5%, rgba(255, 122, 26, 0.16) 0%, rgba(255, 122, 26, 0) 70%),
+    radial-gradient(40% 40% at 82% 8%, rgba(59, 158, 255, 0.1) 0%, rgba(59, 158, 255, 0) 70%);
+}
+
+.vf-card-hover {
+  transition:
+    border-color 0.16s var(--vf-ease-standard, ease),
+    transform 0.16s var(--vf-ease-standard, ease),
+    background 0.16s var(--vf-ease-standard, ease);
+}
+.vf-card-hover:hover {
+  border-color: var(--vf-border-strong);
+  transform: translateY(-2px);
+}
+
+/* Faint dotted grid for the hero editor mock. */
+.vf-dot-grid {
+  background-image: radial-gradient(var(--vf-border-subtle) 1px, transparent 1px);
+  background-size: 18px 18px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vf-card-hover { transition: none; }
+  .vf-card-hover:hover { transform: none; }
+}
