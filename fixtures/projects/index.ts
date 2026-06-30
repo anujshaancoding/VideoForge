@@ -377,6 +377,77 @@ export const overlayTextWeightOpacityProject = textProject(
   ],
 );
 
+// ── (k) CAPTION-TYPEWRITER (character-by-character reveal parity) ───────────────────
+// The big-caption typewriter feature (Script Studio): a TextOverlay whose
+// `animation.typewriter.words[]` drives a per-character reveal. The SHARED
+// getRevealedPrefix/getCharRevealSteps helper computes the revealed prefix for BOTH
+// the preview canvas AND the exporter's per-step `drawtext enable=between(...)` stages,
+// so the partially-revealed caption is frame-identical in both (WYCIWYG; DECISIONS
+// 2026-06-27). Two cases, each sampled at a MID-reveal time so the golden captures a
+// genuine PARTIAL prefix (not the trivially-equal empty/full ends):
+//   (a) char-level, EVEN distribution: one word window over the whole string, so each
+//       character reveals at start + span*c/len. At t=1000ms (mid the 0–2000 window) a
+//       ~half prefix is shown — the even-distribution timing the helper synthesises.
+//   (b) word-timed, REAL Script Studio words[]: three words with distinct windows; at
+//       t=1100ms the first two words + the leading chars of the third are revealed.
+// Inter-dependent (drawtext), like the other text fixtures: renders only on the pinned
+// image that bundles Inter; the gate skips locally exactly as for overlay_text_*.
+const TW_CHAR_TEXT = "TYPEWRITER"; // 10 chars, one even-distributed word window
+export const captionTypewriterCharProject = textProject(
+  "ab111111-1111-4111-8111-111111111111",
+  "caption_typewriter_char",
+  [
+    textOverlay(
+      "ab111111-1111-4111-8111-1111111111d1",
+      TW_CHAR_TEXT,
+      { fontSize: 56, align: "center" },
+      {
+        canvasX: 5,
+        canvasY: 70, // lower-third, like the Script Studio big caption
+        width: 90,
+        height: 20,
+        animation: {
+          typewriter: {
+            // Single word window spanning the overlay → even per-char distribution.
+            words: [{ text: TW_CHAR_TEXT, startMs: 0, endMs: 2000 }],
+          },
+        },
+      },
+    ),
+  ],
+);
+
+// Real Script Studio words[]: each word has its own [startMs,endMs) window (the
+// even-distributed VO timing assemblePlanned emits). Chars within a word spread evenly
+// across that word's window; the space before a word reveals with that word's first char.
+const TW_WORD_TEXT = "Make it pop";
+export const captionTypewriterWordProject = textProject(
+  "ab222222-2222-4222-8222-222222222222",
+  "caption_typewriter_word",
+  [
+    textOverlay(
+      "ab222222-2222-4222-8222-2222222222d1",
+      TW_WORD_TEXT,
+      { fontSize: 56, align: "center" },
+      {
+        canvasX: 5,
+        canvasY: 70,
+        width: 90,
+        height: 20,
+        animation: {
+          typewriter: {
+            words: [
+              { text: "Make", startMs: 0, endMs: 700 },
+              { text: "it", startMs: 700, endMs: 1100 },
+              { text: "pop", startMs: 1100, endMs: 2000 },
+            ],
+          },
+        },
+      },
+    ),
+  ],
+);
+
 // ── (d) SPLIT ─────────────────────────────────────────────────────────────────────
 // One source split into TWO adjacent timeline clips at the cut point. Clip A plays
 // source 0–1000ms on timeline 0–1000; clip B plays source 1000–2000ms on timeline
@@ -753,6 +824,15 @@ export const GOLDEN_FIXTURES: GoldenFixture[] = [
   { id: "overlay_underline", project: overlayUnderlineProject, sampleTimesMs: [1000] },
   // Caption force_style burn-in (Inter via fontconfig in the pinned image).
   { id: "caption_burn", project: captionBurnProject, settings: { captions: "burn" }, sampleTimesMs: [1000] },
+
+  // ── Caption typewriter (character-by-character reveal) — sampled MID-reveal so the
+  // golden captures a genuine partial prefix. The SHARED getCharRevealSteps drives the
+  // per-step drawtext enable=between(...) stages; preview's getRevealedPrefix returns the
+  // SAME prefix at the SAME playhead → frame-identical. Inter-dependent like text fixtures.
+  //   (a) char-level even-distribution: "TYPEWRITER" over 0–2000ms; @1000ms ⇒ "TYPEWR".
+  { id: "caption_typewriter_char", project: captionTypewriterCharProject, sampleTimesMs: [1000] },
+  //   (b) word-timed from real words[]: "Make it pop"; @1100ms ⇒ "Make it p".
+  { id: "caption_typewriter_word", project: captionTypewriterWordProject, sampleTimesMs: [1100] },
 
   // ── Audio parity (RMS, not frame SSIM) ──────────────────────────────────────────
   // Volume envelope: gain ramps 0%→100% over 2s; later window must be much louder.

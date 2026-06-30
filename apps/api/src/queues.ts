@@ -56,7 +56,8 @@ export interface ScriptJobData {
   voiceId: string;
   /** Whether to attach a bundled CC0 music bed. */
   withMusic: boolean;
-  /** Sketch style to auto-illustrate scenes with ('pen'|'graphite'|'color'), or null. */
+  /** Scene-image style: 'pen'|'graphite'|'color' (AI sketch) | 'photo' (real web
+   *  image) | null (text-card video). Validated by isIllustrationStyle in the worker. */
   sketchStyle?: string | null;
 }
 

@@ -27,7 +27,7 @@ import type { Clip, Project, TextOverlay, ImageOverlay, Keyframe } from "@videof
 // Shared text-overlay layout — the ONE percent→pixel/size/floor/outline-scale formula
 // the FFmpeg export also consumes, so preview geometry == export drawtext (§7.5).
 // `weightToInterFile` is export-only; preview keeps the CSS `Inter` family.
-import { layoutTextOverlay, weightToInterFace, underlineRule, DEFAULT_LINE_HEIGHT, clipFitRects } from "@videoforge/project-schema";
+import { layoutTextOverlay, weightToInterFace, underlineRule, DEFAULT_LINE_HEIGHT, clipFitRects, getRevealedPrefix } from "@videoforge/project-schema";
 
 /**
  * CSS numeric weight of the bundled Inter face a numeric weight buckets into.
@@ -190,6 +190,18 @@ export class PreviewEngine {
     this.playStartMs = Math.max(0, ms);
     this.playStartAudioTime = this.audioEngine?.audioCtx.currentTime ?? 0;
     this.lastEmitAt = 0;
+    if (!this.isPlaying) this._drawFrame(this.playStartMs);
+  }
+
+  /**
+   * Repaint the current paused frame. Needed because some events clear or stale the
+   * canvas bitmap *after* the engine's last paint — notably resizing the backing store
+   * (`canvas.width = …` wipes the bitmap) on mount, and web fonts (Inter) finishing
+   * loading after the first frame was drawn. Without an explicit repaint the very first
+   * frame after a load/reload stays blank until the user happens to seek. No-op during
+   * playback — the rAF loop already paints every frame.
+   */
+  redraw(): void {
     if (!this.isPlaying) this._drawFrame(this.playStartMs);
   }
 
@@ -1003,10 +1015,26 @@ export class PreviewEngine {
           // using line pitch = fontPx * DEFAULT_LINE_HEIGHT (1.2). For a single line
           // this is identical to the old single-fillText at y + bh/2 (no visual change).
           const lineHeight = style.lineHeight ?? DEFAULT_LINE_HEIGHT;
-          const lines = textOv.text.split("\n");
+          // Character-by-character typewriter reveal (Script Studio big-caption track):
+          // render only the revealed PREFIX of the text at this playhead. The geometry,
+          // font, size, colour, outline, anchor and line pitch all stay derived from the
+          // overlay above — ONLY the rendered string changes — so a partially-revealed
+          // caption sits exactly where the full caption would. The prefix comes from the
+          // SHARED `getRevealedPrefix` helper that the FFmpeg export also consumes, so the
+          // reveal cannot diverge from the export (WYCIWYG). When the overlay carries no
+          // `animation.typewriter.words[]` (every overlay outside Script Studio captions),
+          // getRevealedPrefix returns the full text — byte-identical to the static render.
+          const revealed = getRevealedPrefix(textOv, playheadMs);
+          const lines = revealed.split("\n");
           const centerY = L.boxY + L.boxH / 2;
           const pitch = L.fontPx * lineHeight;
-          const firstY = centerY - ((lines.length - 1) * pitch) / 2;
+          // Vertical block centring uses the FULL text's line count (not the revealed
+          // prefix's), so each revealed line lands at the SAME y the finished caption
+          // would — the block doesn't shift vertically as lines fill in, matching the
+          // export's fixed per-overlay drawtext box. For the common single-line Script
+          // Studio big-caption this is identical to the static path.
+          const fullLineCount = textOv.text.split("\n").length;
+          const firstY = centerY - ((fullLineCount - 1) * pitch) / 2;
           for (let i = 0; i < lines.length; i++) {
             const lineY = firstY + i * pitch;
             if (hasOutline) ctx.strokeText(lines[i]!, L.anchorX, lineY);

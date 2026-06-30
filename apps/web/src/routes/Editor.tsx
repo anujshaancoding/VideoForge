@@ -9,6 +9,7 @@ import {
   TopBar,
   Transport,
   EditorErrorBoundary,
+  CommandEditBar,
 } from "../components/editor/index.js";
 import { useEditorStore } from "../store/editorStore.js";
 import { useAssetStore } from "../store/assetStore.js";
@@ -21,11 +22,12 @@ import { armAutosave, disarmAutosave, saveNow } from "../lib/useAutosave.js";
 import { readViewPrefs, writeViewPrefs } from "../lib/viewPrefs.js";
 import { Button, Tooltip } from "../components/ui/index.js";
 import AutoArrangeModal from "../components/editor/AutoArrangeModal.js";
+import ShortcutsModal from "../components/editor/ShortcutsModal.js";
 import { cx } from "../components/ui/cx.js";
 import { previewEngine } from "../engine/index.js";
 import { wsClient } from "../lib/wsClient.js";
 import type { Project } from "@videoforge/project-schema";
-import { LayoutGrid, Image, Type, Captions, Music, Shapes, Palette, Sparkles } from "lucide-react";
+import { LayoutGrid, Image, Type, Captions, Music, Shapes, Palette, Sparkles, Command } from "lucide-react";
 import TemplatesPanel from "../components/editor/TemplatesPanel.js";
 
 /** Every source-asset id referenced by a project (media clips + image-kind overlays). */
@@ -57,7 +59,7 @@ function referencedAssetIds(project: Project): string[] {
 // LAYOUT; the inner components are built by the EditorShell stage. Loading + a
 // not-found fallback live here.
 
-const TIMELINE_HEIGHT = 260; // px, §3.4 default (180–600 resizable handled later)
+const TIMELINE_HEIGHT = 330; // px, includes the AI command bar above the timeline.
 
 export default function Editor() {
   const { id } = useParams<{ id: string }>();
@@ -87,6 +89,7 @@ export default function Editor() {
   // shots" tray. We auto-open it once, and keep a persistent button to reopen it.
   const cameFromScript = searchParams.get("arrange") === "1";
   const [arrangeOpen, setArrangeOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const arrangeAutoOpenedRef = useRef(false);
   useEffect(() => {
     if (loading || notFound || loadError) return;
@@ -135,6 +138,18 @@ export default function Editor() {
 
   useEffect(() => {
     if (!id) return;
+    // DEV-only QA bypass: `/editor/qa-sample` loads the in-memory sample project and
+    // skips the backend fetch entirely, so the editor (and Command Bar) can be tested
+    // without auth/DB. Gated to dev; the sentinel id never exists in production.
+    if (import.meta.env.DEV && id === "qa-sample") {
+      import("@videoforge/project-schema").then(({ sampleProject }) => {
+        loadProject(structuredClone(sampleProject));
+        setLoading(false);
+        setNotFound(false);
+        setLoadError(false);
+      });
+      return;
+    }
     if (!user) return; // RequireAuth will redirect; never fetch without a session.
 
     let cancelled = false;
@@ -403,6 +418,13 @@ export default function Editor() {
         if (ovTrack) {
           st.addTextOverlay("Body", ovTrack.id, st.playheadMs);
         }
+      } else if (!mod && (e.key === "?" || (e.shiftKey && e.code === "Slash"))) {
+        // ? → open the keyboard-shortcuts cheat sheet (discoverability for the
+        // full shortcut set, incl. the J/K/L pro keys). Esc / backdrop closes it.
+        // Accept both the resolved "?" char and Shift+Slash so it works regardless of
+        // keyboard layout / how the event reports the key.
+        e.preventDefault();
+        setShortcutsOpen(true);
       } else if (mod && e.key === "/") {
         // Cmd+/ → toggle left sidebar (media panel or close)
         e.preventDefault();
@@ -473,6 +495,7 @@ export default function Editor() {
       splitAtPlayhead,
       setPlayhead,
       setLeftRailTab, // for Cmd+/ toggle
+      setShortcutsOpen, // for "?" shortcuts cheat sheet
     ],
   );
 
@@ -484,6 +507,14 @@ export default function Editor() {
     document.addEventListener("keydown", handleKeyDown, opts);
     return () => document.removeEventListener("keydown", handleKeyDown, opts);
   }, [handleKeyDown]);
+
+  // Let any descendant (e.g. the StatusBar "Shortcuts" button) open the cheat sheet
+  // without prop-drilling through TopBar/Timeline — a tiny decoupled window event.
+  useEffect(() => {
+    const open = () => setShortcutsOpen(true);
+    window.addEventListener("vf:open-shortcuts", open);
+    return () => window.removeEventListener("vf:open-shortcuts", open);
+  }, []);
 
   if (loading && !notFound && !loadError) {
     return (
@@ -562,13 +593,22 @@ export default function Editor() {
                   {id:'audio', label:'Audio', icon: Music},
                   {id:'elements', label:'Elements', icon: Shapes, disabled:false},
                   {id:'brand', label:'Brand', icon: Palette, disabled:true},
-                  {id:'ai', label:'AI', icon: Sparkles, disabled:true},
+                  {id:'ai', label:'Command', icon: Command, disabled:false},
                 ].map(item => {
                   const Icon = item.icon;
+                  const handleRailClick = () => {
+                    if (item.disabled) return;
+                    if (item.id === 'ai') {
+                      window.dispatchEvent(new Event("vf:focus-ai-edit"));
+                      setLeftRailTab(null);
+                      return;
+                    }
+                    setLeftRailTab(item.id);
+                  };
                   return (
-                    <Tooltip key={item.id} label={item.disabled ? `${item.label} (coming soon)` : item.label}>
+                    <Tooltip key={item.id} label={item.id === 'ai' ? 'Command Bar (⌘K)' : item.disabled ? `${item.label} (coming soon)` : item.label}>
                       <button
-                        onClick={() => !item.disabled && setLeftRailTab(item.id)}
+                        onClick={handleRailClick}
                         disabled={item.disabled}
                         className={cx(
                           "w-14 h-14 flex flex-col items-center justify-center rounded-xl hover:bg-vf-surface-2 active:bg-vf-surface-3 transition-all",
@@ -795,8 +835,11 @@ export default function Editor() {
         )}
 
         {/* Band 3 — Timeline (supportive, polished, contained) */}
-        <div className="row-start-3 min-h-0 overflow-hidden border-t border-vf-border-subtle bg-vf-surface-1">
-          <Timeline />
+        <div className="row-start-3 grid min-h-0 grid-rows-[auto_1fr] overflow-hidden border-t border-vf-border-subtle bg-vf-surface-1">
+          <CommandEditBar />
+          <div className="min-h-0 overflow-hidden">
+            <Timeline />
+          </div>
         </div>
 
         {/* Band 4 — Status */}
@@ -818,6 +861,7 @@ export default function Editor() {
           </button>
         )}
         <AutoArrangeModal open={arrangeOpen} onClose={closeArrange} />
+        <ShortcutsModal open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
       </div>
     </EditorErrorBoundary>
   );

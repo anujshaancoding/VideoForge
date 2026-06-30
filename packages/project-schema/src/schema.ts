@@ -173,6 +173,21 @@ export const OverlayAnimationSchema = z
     in: animationStep.optional(),
     out: animationStep.optional(),
     loop: animationStep.nullable().optional(),
+    // Character-by-character typewriter reveal for a Script Studio big-caption
+    // TextOverlay. OPTIONAL + nullable: ABSENT/null on every existing overlay ⇒
+    // static behaviour (full text for the whole duration), byte-identical to today.
+    // `words[]` are timeline-absolute ms (same origin as startOnTimeline). The shared
+    // captionTypewriter helpers compute the reveal for BOTH preview and export, so
+    // adding this field cannot break validation on any existing project document.
+    typewriter: z
+      .object({
+        words: z.array(
+          z.object({ text: z.string(), startMs: millis, endMs: millis }).strict(),
+        ),
+      })
+      .strict()
+      .nullable()
+      .optional(),
   })
   .strict();
 

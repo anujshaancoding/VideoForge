@@ -7,7 +7,7 @@ import {
 import { msToTimecode } from "@videoforge/project-schema";
 import { useAutosave, type SaveStatus } from "../../lib/useAutosave.js";
 import { cx } from "../ui/index.js";
-import { Zap, History } from "lucide-react";
+import { Zap, History, Keyboard } from "lucide-react";
 import VersionsPanel from "./VersionsPanel.js";
 
 const SAVE_DOT: Record<SaveStatus, string> = {
@@ -58,6 +58,16 @@ export default function StatusBar() {
         <span aria-hidden="true" className={cx("h-2 w-2 rounded-full", SAVE_DOT[effectiveSaveStatus])} />
         {SAVE_LABEL[effectiveSaveStatus]}
       </span>
+
+      <button
+        type="button"
+        onClick={() => window.dispatchEvent(new Event("vf:open-shortcuts"))}
+        aria-label="Keyboard shortcuts (press ?)"
+        title="Keyboard shortcuts (?)"
+        className="flex items-center gap-1 rounded-sm px-1.5 py-0.5 text-vf-text-tertiary transition-colors hover:bg-vf-surface-2 hover:text-vf-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-vf-selection"
+      >
+        <Keyboard className="h-3 w-3" aria-hidden="true" /> Shortcuts
+      </button>
 
       <button
         type="button"

@@ -13,9 +13,8 @@ body {
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   font-feature-settings: "cv11", "ss01";
-  overflow: hidden;
 }
-#root { height: 100vh; width: 100vw; overflow: hidden; }
+#root { height: 100vh; width: 100vw; overflow-y: auto; overflow-x: hidden; }
 .mono { font-family: var(--vf-font-mono); font-feature-settings: "tnum" 1; font-variant-numeric: tabular-nums; }
 
 button { font-family: inherit; color: inherit; cursor: pointer; border: none; background: none; }

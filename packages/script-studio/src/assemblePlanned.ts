@@ -199,10 +199,21 @@ function buildOverlay(o: {
   width: number;
   height: number;
   style: TextStyle;
+  /**
+   * Per-word timeline-absolute windows for the big-caption typewriter reveal. When
+   * present + non-empty, set `animation.typewriter.words[]` so the SHARED
+   * captionTypewriter helper drives a character-by-character reveal in BOTH preview and
+   * export. ABSENT/empty ⇒ `animation:{}` (static whole-overlay caption, byte-identical
+   * to today) — every non-big-caption overlay keeps the static path. WYCIWYG (AC-6).
+   */
+  words?: Array<{ text: string; startMs: number; endMs: number }>;
 }): TextOverlay {
   // CRITICAL: only export-rendered style keys are set (no gradient/shadow/
-  // letterSpacing/backgroundColor); rotation:0 + animation:{} so nothing the
-  // exporter drops can change the picture. WYCIWYG (AC-6).
+  // letterSpacing/backgroundColor); rotation:0 so nothing the exporter drops can change
+  // the picture. `animation` is {} (static) UNLESS typewriter words are supplied — both
+  // shapes are driven by the SHARED helper, so preview == export either way. WYCIWYG.
+  const animation =
+    o.words && o.words.length > 0 ? { typewriter: { words: o.words } } : {};
   return {
     id: o.overlayId,
     trackId: o.trackId,
@@ -215,7 +226,7 @@ function buildOverlay(o: {
     height: o.height,
     rotation: 0,
     opacity: 100,
-    animation: {},
+    animation,
     keyframes: {},
     text: o.text,
     style: o.style,
@@ -228,6 +239,15 @@ interface Chunk {
   text: string;
   startMs: number;
   endMs: number;
+  /**
+   * Per-word timeline-absolute windows for the chunk's words, in order. Drives the
+   * character-by-character typewriter reveal: the SHARED captionTypewriter helper
+   * spreads each word's window across its characters (even distribution v1), so the
+   * caption reveals one char at a time synced to the voice-over. Same units/origin as
+   * `startOnTimeline`. The exporter + preview both consume these via the shared helper,
+   * so the reveal cannot diverge (WYCIWYG). Empty ⇒ static whole-chunk caption (today).
+   */
+  words: Array<{ text: string; startMs: number; endMs: number }>;
 }
 
 /**
@@ -261,8 +281,13 @@ function chunkBigCaption(w: SceneWindow): Chunk[] {
       const lastWord = vw[wordCursor + groupLen - 1]!;
       const cs = start + Math.round(firstWord.startMs);
       const ce = start + Math.round(lastWord.endMs);
+      // Timeline-absolute per-word windows for the typewriter reveal (real VO timing).
+      const cwords = groups[g]!.map((wtext, wi) => {
+        const ww = vw[wordCursor + wi]!;
+        return { text: wtext, startMs: start + Math.round(ww.startMs), endMs: start + Math.round(ww.endMs) };
+      });
       wordCursor += groupLen;
-      chunks.push({ text: groups[g]!.join(" "), startMs: cs, endMs: ce });
+      chunks.push({ text: groups[g]!.join(" "), startMs: cs, endMs: ce, words: cwords });
     }
     // Clamp + enforce contiguity/monotonicity inside the window so spans are valid
     // and tile the timeline (overlapping/te past-end timings can't smuggle in).
@@ -275,7 +300,16 @@ function chunkBigCaption(w: SceneWindow): Chunk[] {
   const chunks: Chunk[] = groups.map((g, i) => {
     const cs = start + Math.round((span * i) / total);
     const ce = start + Math.round((span * (i + 1)) / total);
-    return { text: g.join(" "), startMs: cs, endMs: ce };
+    // Even-distribute the chunk's words across its window so the typewriter reveal still
+    // tracks the voice-over rhythm when real per-word timings are absent (the v1 fallback;
+    // aeneas forced-alignment is the optional fast-follow). Same units as startOnTimeline.
+    const wspan = ce - cs;
+    const cwords = g.map((wtext, wi) => ({
+      text: wtext,
+      startMs: cs + Math.round((wspan * wi) / g.length),
+      endMs: cs + Math.round((wspan * (wi + 1)) / g.length),
+    }));
+    return { text: g.join(" "), startMs: cs, endMs: ce, words: cwords };
   });
   return normaliseChunks(chunks, start, end);
 }
@@ -286,13 +320,22 @@ function normaliseChunks(chunks: Chunk[], start: number, end: number): Chunk[] {
   const out: Chunk[] = [];
   for (let i = 0; i < chunks.length; i++) {
     const c = chunks[i]!;
-    let cs = Math.max(prevEnd, Math.min(c.startMs, end));
+    const cs = Math.max(prevEnd, Math.min(c.startMs, end));
     let ce = Math.max(cs + 1, Math.min(Math.max(c.endMs, cs + 1), end));
     // Last chunk extends to the window end so the sequence tiles fully.
     if (i === chunks.length - 1) ce = end;
     // Guard against a zero/negative window: keep at least 1ms.
     if (ce <= cs) ce = Math.min(cs + 1, end > start ? end : cs + 1);
-    out.push({ text: c.text, startMs: cs, endMs: ce });
+    // Clamp the per-word typewriter windows into the (clamped) chunk window so the
+    // reveal timing can never fall outside the overlay's [startOnTimeline,endOnTimeline].
+    // The shared helper re-clamps monotonically too, but keeping the data inside the
+    // window here keeps preview and export reading identical, in-bounds timings.
+    const cwords = c.words.map((wd) => {
+      const ws = Math.max(cs, Math.min(wd.startMs, ce));
+      const we = Math.max(ws, Math.min(wd.endMs, ce));
+      return { text: wd.text, startMs: ws, endMs: we };
+    });
+    out.push({ text: c.text, startMs: cs, endMs: ce, words: cwords });
     prevEnd = ce;
   }
   return out;
@@ -612,6 +655,10 @@ export function assemblePlannedProject(input: AssemblePlannedInput): AssembledPl
           width: BIG_W,
           height: BIG_H,
           style: subsetStyle(sceneStyle, BIG_FONT),
+          // Character-by-character typewriter reveal synced to the voice-over (the chunk's
+          // per-word windows). Only the big-caption track carries this; every other overlay
+          // stays static. The exporter + preview consume it via the SHARED helper.
+          words: c.words,
         }),
       );
     });

@@ -14,7 +14,7 @@ import { validateProject, type Project } from '@videoforge/project-schema';
 // ExportModal (§8.2) — MP4/H.264, ≤1080p Free-tier cap, social presets.
 // Real flow: POST /api/v1/exports → poll until COMPLETE → mint download URL.
 
-type Preset = '9:16' | '16:9' | '1:1' | 'custom';
+type Preset = '9:16' | '16:9' | '1:1' | '4:5' | '4:3' | 'custom';
 type CaptionMode = 'none' | 'burn' | 'sidecar';
 type Phase = 'config' | 'exporting' | 'done' | 'error' | 'ratelimited';
 
@@ -22,6 +22,8 @@ const PRESETS: Record<Exclude<Preset, 'custom'>, { w: number; h: number; label: 
   '9:16': { w: 1080, h: 1920, label: 'TikTok / Reels' },
   '16:9': { w: 1920, h: 1080, label: 'YouTube' },
   '1:1': { w: 1080, h: 1080, label: 'Instagram feed' },
+  '4:5': { w: 1080, h: 1350, label: 'Instagram portrait' },
+  '4:3': { w: 1440, h: 1080, label: 'Classic / TV' },
 };
 
 function estimateSizeMb(w: number, h: number, fps: number, durationMs: number): number {
@@ -73,14 +75,12 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
   const durationMs = useEditorStore(selectProjectDurationMs);
   const hasCaptions = useEditorStore((s) => (s.project.captionTracks[0]?.blocks.length ?? 0) > 0);
 
+  // Default the export preset to the project's own aspect ratio when it matches a
+  // named preset; otherwise fall back to 'custom' (= match project). Looking the key
+  // up in PRESETS keeps this in lock-step with the preset list (no per-ratio branch
+  // to forget when a new ratio is added — e.g. 4:5 / 4:3).
   const initialPreset: Preset =
-    project.canvas.aspectRatio === '16:9'
-      ? '16:9'
-      : project.canvas.aspectRatio === '9:16'
-        ? '9:16'
-        : project.canvas.aspectRatio === '1:1'
-          ? '1:1'
-          : 'custom';
+    project.canvas.aspectRatio in PRESETS ? (project.canvas.aspectRatio as Preset) : 'custom';
 
   const [tab, setTab] = useState<'format' | 'captions'>('format');
   const [preset, setPreset] = useState<Preset>(initialPreset);
@@ -581,8 +581,8 @@ export default function ExportModal({ open, onClose }: ExportModalProps) {
             <div className="flex flex-col gap-4">
               <fieldset>
                 <legend className="mb-2 text-xs font-medium text-vf-text-secondary">Preset</legend>
-                <div className="grid grid-cols-4 gap-2">
-                  {(['9:16', '16:9', '1:1', 'custom'] as Preset[]).map((p) => {
+                <div className="grid grid-cols-3 gap-2">
+                  {(['9:16', '16:9', '1:1', '4:5', '4:3', 'custom'] as Preset[]).map((p) => {
                     const meta = p === 'custom' ? null : PRESETS[p];
                     return (
                       <button

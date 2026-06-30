@@ -1,0 +1,90 @@
+{
+  "id": "agent-spotlight",
+  "title": "Gekko Agent Spotlight — Full Kit Breakdown",
+  "voiceId": "af_heart",
+  "canvas": {
+    "width": 1080,
+    "height": 1920,
+    "frameRate": 30
+  },
+  "scenes": [
+    {
+      "sceneIndex": 0,
+      "voiceoverText": "Meet Gekko — an initiator who flips fights with a squad of creatures. Here's his entire kit.",
+      "smallCaption": "Meet Gekko",
+      "brollSuggestion": {
+        "mediaType": "photo",
+        "keywords": [
+          "gekko"
+        ],
+        "description": "Meet Gekko"
+      },
+      "framePath": "/Users/anujshaan/Workspace/02_PERSONAL/studio.Zentrix/VideoForge/assets/valorant/storyboards/agent-spotlight/scene-0.png"
+    },
+    {
+      "sceneIndex": 1,
+      "voiceoverText": "Wingman scouts ahead, and he can plant or defuse the spike for you. Then you walk over and pick him right back up.",
+      "smallCaption": "Wingman",
+      "brollSuggestion": {
+        "mediaType": "photo",
+        "keywords": [
+          "wingman"
+        ],
+        "description": "Wingman"
+      },
+      "framePath": "/Users/anujshaan/Workspace/02_PERSONAL/studio.Zentrix/VideoForge/assets/valorant/storyboards/agent-spotlight/scene-1.png"
+    },
+    {
+      "sceneIndex": 2,
+      "voiceoverText": "Dizzy flies out and blinds every enemy in line of sight. That is your cue to swing the angle.",
+      "smallCaption": "Dizzy",
+      "brollSuggestion": {
+        "mediaType": "photo",
+        "keywords": [
+          "dizzy"
+        ],
+        "description": "Dizzy"
+      },
+      "framePath": "/Users/anujshaan/Workspace/02_PERSONAL/studio.Zentrix/VideoForge/assets/valorant/storyboards/agent-spotlight/scene-2.png"
+    },
+    {
+      "sceneIndex": 3,
+      "voiceoverText": "Mosh Pit is a molly that blankets a whole site, perfect for clearing tight corners before you push.",
+      "smallCaption": "Mosh Pit",
+      "brollSuggestion": {
+        "mediaType": "photo",
+        "keywords": [
+          "mosh pit"
+        ],
+        "description": "Mosh Pit"
+      },
+      "framePath": "/Users/anujshaan/Workspace/02_PERSONAL/studio.Zentrix/VideoForge/assets/valorant/storyboards/agent-spotlight/scene-3.png"
+    },
+    {
+      "sceneIndex": 4,
+      "voiceoverText": "And his ultimate, Thrash, lets you fly a creature into the enemy and detonate, pinning everyone it catches.",
+      "smallCaption": "Thrash",
+      "brollSuggestion": {
+        "mediaType": "photo",
+        "keywords": [
+          "thrash"
+        ],
+        "description": "Thrash"
+      },
+      "framePath": "/Users/anujshaan/Workspace/02_PERSONAL/studio.Zentrix/VideoForge/assets/valorant/storyboards/agent-spotlight/scene-4.png"
+    },
+    {
+      "sceneIndex": 5,
+      "voiceoverText": "Low skill floor, huge utility, and you reclaim your abilities every round. Gekko is one of the best agents for beginners. Would you main him?",
+      "smallCaption": "Worth maining?",
+      "brollSuggestion": {
+        "mediaType": "photo",
+        "keywords": [
+          "gekko"
+        ],
+        "description": "Worth maining?"
+      },
+      "framePath": "/Users/anujshaan/Workspace/02_PERSONAL/studio.Zentrix/VideoForge/assets/valorant/storyboards/agent-spotlight/scene-5.png"
+    }
+  ]
+}

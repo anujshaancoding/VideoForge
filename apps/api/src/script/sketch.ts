@@ -29,6 +29,30 @@ export const SKETCH_STYLES: readonly SketchStyle[] = ['graphite', 'pen', 'color'
 /** Default style (CEO pick 2026-06-16): pen ink line art — cleanest, most forgiving. */
 export const DEFAULT_SKETCH_STYLE: SketchStyle = 'pen';
 
+// ── Illustration style = the b-roll look the user picks for a script ──────────────
+// The three SketchStyles above stylise an AI-generated base into one consistent hand.
+// Two other KINDS skip the sharp filter entirely (the orchestrator branches on them):
+//   'line'  — the AI base is ALREADY minimal single-line ink art (the promptFor line-art
+//             prompt does the work); keep it intact, just cover-fit to canvas. The pen
+//             threshold over-cooks an already-sparse base (uniform black, lost airiness),
+//             so 'line' is the truest match to the reference look (CEO, 2026-06-27) and
+//             the default. Pairs with the FLUX/Pollinations engine.
+//   'photo' — retrieve a REAL web image (imageSearch.ts) and keep it intact — for scripts
+//             about real, named subjects where authenticity beats generation.
+// Both are threaded through the SAME `sketchStyle` lever.
+export type IllustrationStyle = SketchStyle | 'line' | 'photo';
+
+export const ILLUSTRATION_STYLES: readonly IllustrationStyle[] = [
+  'line',
+  'graphite',
+  'pen',
+  'color',
+  'photo',
+];
+
+/** Default illustration look (CEO pick 2026-06-27): minimal line art, unfiltered base. */
+export const DEFAULT_ILLUSTRATION_STYLE: IllustrationStyle = 'line';
+
 export interface SketchTarget {
   width: number;
   height: number;
@@ -36,6 +60,10 @@ export interface SketchTarget {
 
 export function isSketchStyle(v: unknown): v is SketchStyle {
   return typeof v === 'string' && (SKETCH_STYLES as readonly string[]).includes(v);
+}
+
+export function isIllustrationStyle(v: unknown): v is IllustrationStyle {
+  return typeof v === 'string' && (ILLUSTRATION_STYLES as readonly string[]).includes(v);
 }
 
 /** Load the source as RGB, optionally resized (cover) to the export canvas size. The

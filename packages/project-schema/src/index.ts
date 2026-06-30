@@ -37,6 +37,15 @@ export type { TextLayout, InterFace, UnderlineRule } from "./textOverlayLayout.j
 // rects); `clipFitScaleSteps` is the export half (FFmpeg filter steps).
 export { clipFitRects, clipFitScaleSteps, normalizeClipFit } from "./clipFit.js";
 
+// Shared caption-typewriter reveal — the ONE pure helper that computes the revealed
+// character prefix at a given playhead from a TextOverlay's `animation.typewriter.words[]`.
+// BOTH the preview canvas (`getRevealedPrefix`) and the FFmpeg export (`getCharRevealSteps`)
+// consume these, so the character reveal cannot diverge between preview and export
+// (CLAUDE.md "the invariant"; DECISIONS 2026-06-27). Absent timing ⇒ full text / single
+// static step ⇒ byte-identical to today.
+export { getRevealedPrefix, getCharRevealSteps, getTypewriterWords } from "./captionTypewriter.js";
+export type { TypewriterWord, RevealStep } from "./captionTypewriter.js";
+
 /**
  * Current project schema version. Incremented only on breaking schema changes;
  * the server migrates older documents on open (§18.3). New documents are stamped

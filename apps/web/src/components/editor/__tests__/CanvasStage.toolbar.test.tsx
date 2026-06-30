@@ -11,6 +11,7 @@ const engine = vi.hoisted(() => ({
   play: vi.fn(),
   pause: vi.fn(),
   seekTo: vi.fn(),
+  redraw: vi.fn(),
   destroy: vi.fn(),
   updateProject: vi.fn(),
 }));
@@ -22,6 +23,7 @@ vi.mock("../../../engine/index.js", () => ({
     play: engine.play,
     pause: engine.pause,
     seekTo: engine.seekTo,
+    redraw: engine.redraw,
     destroy: engine.destroy,
   },
 }));

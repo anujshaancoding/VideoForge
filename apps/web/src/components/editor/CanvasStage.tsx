@@ -137,6 +137,14 @@ export default function CanvasStage() {
     previewEngine.setProject(store.project);
     audioEngine.updateProject(store.project);
 
+    // The first frame can be painted before the bundled Inter face has finished
+    // loading, leaving text overlays drawn in a fallback (or not yet measurable).
+    // Repaint once fonts are ready so the initial frame matches the export's Inter
+    // rasterisation (the preview==export invariant) without waiting for a seek.
+    if (typeof document !== "undefined" && document.fonts?.ready) {
+      void document.fonts.ready.then(() => previewEngine.redraw()).catch(() => undefined);
+    }
+
     // Autoplay policy: the AudioContext (our master playback clock) is created
     // SUSPENDED on every page load until a user gesture. Resume it on the first
     // interaction so the clock is already running by the time Play is pressed —
@@ -212,6 +220,10 @@ export default function CanvasStage() {
     const scale = Math.min(1, 720 / Math.max(canvasW, canvasH));
     canvas.width = Math.round(canvasW * scale);
     canvas.height = Math.round(canvasH * scale);
+    // Setting canvas.width/height clears the bitmap. The engine-init effect already
+    // painted the first frame (at the default 300×150 size), so without this repaint
+    // the canvas sits blank after load until the user seeks. Repaint at the new size.
+    previewEngine.redraw();
   }, [canvasW, canvasH]);
 
   // clearSelection is now handled at the viewport level (see onPointerDown below)

@@ -59,3 +59,12 @@ fixtures/media/.golden-work/
 *.pid
 *.seed
 *.pid.lock
+
+# Downloaded Valorant asset pack (Riot IP — re-fetch via scripts/asset-packs/valorant-pack.mjs; images not committed)
+assets/valorant/**/*.png
+assets/valorant/previews/*.png
+assets/valorant/storyboards/**/*.png
+
+# Stray local-only files (never commit)
+gglobby content assest/
+apps/api/_dbg.mjs

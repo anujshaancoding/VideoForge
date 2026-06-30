@@ -47,7 +47,7 @@ const DRAWTHINGS_TIMEOUT_MS = Number.parseInt(process.env['IMAGEGEN_TIMEOUT_MS']
 /** Spacing between keyless-cloud calls (ms) to respect its ~1/15s anon rate limit. */
 const POLLINATIONS_SPACING_MS = Number.parseInt(process.env['POLLINATIONS_SPACING_MS'] ?? '16000', 10);
 
-export type ImageSource = 'drawthings' | 'pollinations' | 'placeholder';
+export type ImageSource = 'websearch' | 'drawthings' | 'pollinations' | 'placeholder';
 
 export interface GenerateImageOptions {
   /** Deterministic seed (same seed+prompt ⇒ same image on both real engines). */
@@ -202,11 +202,14 @@ export async function generateBaseImage(
     const useDrawThings = ENGINE === 'drawthings' || ENGINE === 'auto';
     const usePollinations = ENGINE === 'pollinations' || ENGINE === 'auto';
 
-    if (useDrawThings && (await tryDrawThings(prompt, opts, pngPath))) {
-      return { pngPath, source: 'drawthings' };
-    }
+    // FLUX-first (CEO pick 2026-06-27): for the minimal line-art look, Pollinations' FLUX
+    // renders the reference aesthetic far better than local SDXL-Turbo. Draw Things stays
+    // as the offline/local fallback (and is still primary if IMAGEGEN_ENGINE=drawthings).
     if (usePollinations && (await tryPollinations(prompt, opts, pngPath))) {
       return { pngPath, source: 'pollinations' };
+    }
+    if (useDrawThings && (await tryDrawThings(prompt, opts, pngPath))) {
+      return { pngPath, source: 'drawthings' };
     }
     await writePlaceholder(opts, pngPath);
     return { pngPath, source: 'placeholder' };

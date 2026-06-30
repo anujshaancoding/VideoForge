@@ -21,6 +21,7 @@ import { describe, it, expect } from "vitest";
 import {
   layoutTextOverlay,
   DEFAULT_LINE_HEIGHT,
+  getRevealedPrefix,
   type Project,
   type TextOverlay,
   type Track,
@@ -181,13 +182,20 @@ function makeProject(overlay: TextOverlay): Project {
  */
 const PLACEHOLDER = "No clip at the playhead";
 function renderOverlay(overlay: TextOverlay): TextCall[] {
+  return renderOverlayAt(overlay, 0);
+}
+
+/** Render one overlay (engine paused) at a specific playhead, returning its text draws. */
+function renderOverlayAt(overlay: TextOverlay, playheadMs: number): TextCall[] {
   const { canvas, calls } = makeRecordingCanvas(CANVAS_W, CANVAS_H);
   const engine = new PreviewEngine();
   engine.init(canvas, makeAudio(), {
     onPlayheadUpdate: () => {},
     onPlaybackEnded: () => {},
   });
-  engine.setProject(makeProject(overlay)); // paused ⇒ composites one frame
+  engine.setProject(makeProject(overlay));
+  calls.length = 0; // discard the setProject() composite at playhead 0
+  engine.seekTo(playheadMs); // paused ⇒ composites one frame at this playhead
   return calls.filter((c) => c.text !== PLACEHOLDER);
 }
 
@@ -204,10 +212,14 @@ describe("PreviewEngine text overlay — shared layout helper (§11.2.1)", () =>
 
     // Font size comes from the shared helper (round((48/1920)*1920) = 48), NOT bespoke math.
     expect(L.fontPx).toBe(48);
-    expect(fill.font).toBe(`${ov.style.fontWeight} ${L.fontPx}px Inter, sans-serif`);
-    // Family is the hardcoded CSS Inter (R1) — fontFamily:"sans-serif" is ignored.
-    expect(fill.font).toContain("Inter, sans-serif");
-    expect(fill.font).not.toContain("sans-serif,"); // not the data's fontFamily
+    // Font family is the hardcoded CSS Inter chain (R1) — the engine renders
+    // `Inter, system-ui, sans-serif` (system-ui is a harmless fallback that only
+    // applies if the bundled Inter face fails to load; Inter always wins in practice,
+    // so preview still matches the export's Inter rasterisation). The data's
+    // fontFamily ("sans-serif") is ignored.
+    expect(fill.font).toBe(`${ov.style.fontWeight} ${L.fontPx}px Inter, system-ui, sans-serif`);
+    expect(fill.font).toContain("Inter, system-ui, sans-serif");
+    expect(fill.font.startsWith(`${ov.style.fontWeight} ${L.fontPx}px Inter`)).toBe(true); // Inter leads, not the data's family
 
     // Horizontal anchor + vertical centre come straight from the helper.
     expect(fill.x).toBe(L.anchorX);
@@ -281,5 +293,67 @@ describe("PreviewEngine text overlay — multi-line block (§11.2.2 / R6)", () =
     const fills = renderOverlay(ov).filter((c) => c.op === "fill");
     expect(fills).toHaveLength(1);
     expect(fills[0]!.y).toBeCloseTo(L.boxY + L.boxH / 2, 6);
+  });
+});
+
+// ── Typewriter character-by-character reveal (Script Studio big-caption track) ──
+// The preview must render ONLY the revealed prefix at the playhead, from the SHARED
+// getRevealedPrefix helper the export also consumes. Geometry/font/anchor stay
+// derived from the full overlay; only the rendered string grows. Absent timing ⇒
+// full text (byte-identical to the static path) — the backward-compat guardrail.
+describe("PreviewEngine text overlay — typewriter reveal", () => {
+  // "Hi all" over [0,1000): word "Hi" reveals across [0,500), "all" across [500,1000).
+  // Even-distribution within each word; the space before "all" reveals at 500.
+  const twOverlay = (): TextOverlay =>
+    makeTextOverlay("Hi all", {
+      startOnTimeline: 0,
+      endOnTimeline: 1000,
+      animation: {
+        typewriter: {
+          words: [
+            { text: "Hi", startMs: 0, endMs: 500 },
+            { text: "all", startMs: 500, endMs: 1000 },
+          ],
+        },
+      },
+    });
+
+  it("renders only the revealed prefix at the playhead (matches getRevealedPrefix)", () => {
+    const ov = twOverlay();
+    for (const t of [0, 250, 500, 750, 999]) {
+      const expected = getRevealedPrefix(ov, t);
+      const fills = renderOverlayAt(ov, t).filter((c) => c.op === "fill");
+      // Single-line caption ⇒ exactly one fill of the revealed prefix (or none if empty).
+      if (expected.length === 0) {
+        expect(fills).toHaveLength(0);
+      } else {
+        expect(fills.map((c) => c.text)).toEqual([expected]);
+      }
+    }
+  });
+
+  it("reveal is a growing prefix that ends at the full text", () => {
+    const ov = twOverlay();
+    expect(getRevealedPrefix(ov, 0)).toBe("H"); // first char of "Hi" at t=0
+    expect(getRevealedPrefix(ov, 999)).toBe("Hi all"); // fully revealed by the end
+  });
+
+  it("revealed prefix keeps the SAME anchor + box-centre y as the static full text", () => {
+    const ov = twOverlay();
+    const L = layoutTextOverlay(ov, CANVAS_W, CANVAS_H, CANVAS_H);
+    const fill = renderOverlayAt(ov, 250).filter((c) => c.op === "fill")[0]!;
+    expect(fill.x).toBe(L.anchorX);
+    expect(fill.y).toBeCloseTo(L.boxY + L.boxH / 2, 6); // single line ⇒ box mid-line, no shift
+  });
+
+  it("absent typewriter timing ⇒ full text at every playhead (static, no regression)", () => {
+    const ov = makeTextOverlay("Static caption", {
+      startOnTimeline: 0,
+      endOnTimeline: 1000,
+    });
+    for (const t of [0, 500, 999]) {
+      const fills = renderOverlayAt(ov, t).filter((c) => c.op === "fill");
+      expect(fills.map((c) => c.text)).toEqual(["Static caption"]);
+    }
   });
 });

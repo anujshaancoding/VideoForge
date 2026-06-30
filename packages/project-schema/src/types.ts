@@ -336,6 +336,24 @@ export interface OverlayAnimation {
   in?: { preset: string; durationMs: Millis };
   out?: { preset: string; durationMs: Millis };
   loop?: { preset: string; durationMs: Millis } | null;
+
+  /**
+   * Character-by-character "typewriter" reveal for a TextOverlay (Script Studio
+   * big-caption track only). When present, the overlay's `text` is revealed one
+   * character at a time, synced to the voice-over via these word windows; when
+   * ABSENT (the default for every existing overlay), the text is fully visible for
+   * the whole overlay duration — byte-identical to today's static drawtext stage.
+   *
+   * `words[]` are TIMELINE-ABSOLUTE ms (same origin as `startOnTimeline`), one per
+   * word of the text, in order. Character-level timing within a word is derived by
+   * EVEN distribution of the word's window (v1 — aeneas forced-alignment is an
+   * optional fast-follow, not required). The SHARED `getRevealedPrefix` /
+   * `getCharRevealSteps` helpers (captionTypewriter.ts) compute the reveal for BOTH
+   * the preview canvas and the FFmpeg export, so the two paths cannot diverge.
+   */
+  typewriter?: {
+    words: Array<{ text: string; startMs: Millis; endMs: Millis }>;
+  } | null;
 }
 
 export interface TextOverlay extends OverlayBase {

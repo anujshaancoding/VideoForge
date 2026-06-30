@@ -374,7 +374,7 @@ export default function Dashboard() {
   const isEmpty = !loading && projects.length === 0;
 
   return (
-    <div className="flex min-h-full flex-col bg-vf-bg-app">
+    <div className="flex h-full flex-col bg-vf-bg-app">
       {/* App header (§4.0) — 56px, matches the editor top bar for continuity. */}
       <header className="flex h-topbar shrink-0 items-center justify-between border-b border-vf-border-subtle bg-vf-surface-1 px-6">
         <div className="flex items-center gap-2">
@@ -389,7 +389,7 @@ export default function Dashboard() {
         <AccountMenu />
       </header>
 
-      <main className="flex-1 px-6 py-8">
+      <main className="min-h-0 flex-1 overflow-y-auto px-6 py-8">
         {loading ? (
           <div
             role="status"

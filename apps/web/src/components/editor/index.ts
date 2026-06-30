@@ -25,4 +25,5 @@ export { default as Transport } from "./Transport.js";
 export { default as Timeline } from "./Timeline.js";
 export { default as Inspector } from "./Inspector.js";
 export { default as StatusBar } from "./StatusBar.js";
+export { default as CommandEditBar } from "./ai-edit/CommandEditBar.js";
 export { EditorErrorBoundary } from "./ErrorBoundary.js";

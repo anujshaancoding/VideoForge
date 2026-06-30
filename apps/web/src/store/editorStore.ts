@@ -41,7 +41,10 @@ import {
   type KenBurns,
   type ClipTransform,
   type ClipFit,
+  validateProject,
 } from "@videoforge/project-schema";
+import type { AppliedEditResult, EditAction, EditPlan } from "../ai-edit/types.js";
+import { resolvePositionGeometry } from "../ai-edit/suggest.js";
 import {
   canRedo as historyCanRedo,
   canUndo as historyCanUndo,
@@ -142,6 +145,16 @@ export interface EditorState {
       Set after applying a template (the project is "new" from template and may not be
       persisted to the user's account yet). */
   suppressSaveErrorUntil: number | null;
+
+  /**
+   * Ephemeral, UI-ONLY dry-run highlight range for the Command Bar (Design Brief
+   * §7.3/§8.6). When the user completes a command that resolves to a plan with a
+   * time/range target, the Command Bar sets this so the Timeline can paint a
+   * translucent sky-blue band over the ms range that WILL be affected. This is pure
+   * transient UI state — it is NOT part of the Project document, never serialized,
+   * never exported, and never undoable. Cleared on cancel/apply/blur/Esc.
+   */
+  commandDryRunRange: { startMs: number; endMs: number } | null;
 }
 
 export interface EditorActions {
@@ -318,6 +331,16 @@ export interface EditorActions {
   importCaptions: (blocks: CaptionBlock[]) => void;
   /** Patch a caption block's editable fields (text, start/end). */
   updateCaption: (blockId: string, patch: Partial<Pick<CaptionBlock, "text" | "startMs" | "endMs">>) => void;
+
+  // ── Command Bar ─────────────────────────────────────────────────────────────
+  /** Apply a validated structured edit plan as one undoable operation. */
+  applyAIEditPlan: (plan: EditPlan) => AppliedEditResult;
+  /**
+   * Set (or clear) the Command Bar dry-run highlight range. Transient UI-only state;
+   * the Timeline reads it to paint a translucent sky-blue band. Pass `null` to clear.
+   * NOT undoable, never persisted/exported.
+   */
+  setCommandDryRunRange: (range: { startMs: number; endMs: number } | null) => void;
 }
 
 export type EditorStore = EditorState & EditorActions;
@@ -416,6 +439,33 @@ function findOverlay(
   return null;
 }
 
+function findClipForAction(project: Project, action: EditAction): { clip: Clip; track: Extract<Track, { clips: Clip[] }> } | null {
+  const target = action.target as { clipId?: string; startTime?: number; endTime?: number } | undefined;
+  if (target?.clipId) return findClip(project, target.clipId);
+  if (target?.startTime !== undefined && target?.endTime !== undefined) {
+    const startMs = ms(target.startTime * 1000);
+    const endMs = ms(target.endTime * 1000);
+    for (const track of project.tracks) {
+      if (!isMediaTrack(track)) continue;
+      const clip = track.clips.find((c) => c.startOnTimeline < endMs && c.endOnTimeline > startMs);
+      if (clip) return { clip, track };
+    }
+  }
+  for (const track of project.tracks) {
+    if (!isMediaTrack(track) || track.type !== "video") continue;
+    const clip = track.clips[0];
+    if (clip) return { clip, track };
+  }
+  return null;
+}
+
+const ASPECT_DIMS: Record<string, { width: number; height: number }> = {
+  "16:9": { width: 1920, height: 1080 },
+  "9:16": { width: 1080, height: 1920 },
+  "1:1": { width: 1080, height: 1080 },
+  "4:5": { width: 1080, height: 1350 },
+};
+
 /** Default lane height + header tint per track type (§2.5 track colors). */
 function trackDefaults(kind: AddTrackKind): { name: string; colour: string; height: number } {
   switch (kind) {
@@ -506,6 +556,7 @@ export const useEditorStore = create<EditorStore>()(
       placeholderLabels: {},
       pendingMediaOpenFor: null,  // one-shot: Editor sub consumes it to switch left rail to Media for placeholders
       suppressSaveErrorUntil: null,
+      commandDryRunRange: null,   // transient Command Bar highlight; never persisted/exported
 
       // ── Project lifecycle ──
       loadProject: (p) =>
@@ -1632,6 +1683,394 @@ export const useEditorStore = create<EditorStore>()(
           }
         });
       },
+
+      applyAIEditPlan: (plan) => {
+        const warnings: string[] = [];
+        const errors: string[] = [];
+        let applied = 0;
+        // Snapshot the editor's selection + playhead for Command Editing target
+        // resolution (PRD §"Target resolution rule"): selected clip first, else the
+        // clip whose timeline range contains the playhead.
+        const { selection: aiSelection, playheadMs: aiPlayheadMs } = get();
+        // Did this plan create a project-schema overlay/structural clip we must
+        // schema-validate post-mutation? (Invariant / Risk 1: AC-9 text overlay.)
+        let mutatedStructure = false;
+
+        commit((project) => {
+          /**
+           * Resolve a media clip target for split/move per the PRD rule:
+           *   1. action.target.clipId (carries the active/selected clip from the parser)
+           *   2. the current editor selection (if it's a media clip)
+           *   3. the media clip whose timeline range contains `atMs` (clip-at-playhead)
+           * Returns null when nothing resolves (caller pushes the inline error).
+           */
+          const resolveTargetClip = (
+            clipId: string | undefined,
+            atMs: number,
+          ): { clip: Clip; track: Extract<Track, { clips: Clip[] }> } | null => {
+            if (clipId) {
+              const byId = findClip(project, clipId);
+              if (byId) return byId;
+            }
+            if (aiSelection.kind === "clip" && aiSelection.id) {
+              const selected = findClip(project, aiSelection.id);
+              if (selected) return selected;
+            }
+            for (const track of project.tracks) {
+              if (!isMediaTrack(track)) continue;
+              const hit = track.clips.find(
+                (c) => c.startOnTimeline <= atMs && c.endOnTimeline > atMs,
+              );
+              if (hit) return { clip: hit, track };
+            }
+            return null;
+          };
+
+          const applyRangeDelete = (startMs: number, endMs: number, ripple: boolean): void => {
+            const spanMs = endMs - startMs;
+            for (const track of project.tracks) {
+              if (!isMediaTrack(track)) continue;
+              const nextClips: Clip[] = [];
+              for (const clip of track.clips) {
+                const overlaps = clip.startOnTimeline < endMs && clip.endOnTimeline > startMs;
+                if (!overlaps) {
+                  const shifted = ripple && clip.startOnTimeline >= endMs
+                    ? {
+                        ...clip,
+                        startOnTimeline: Math.max(0, clip.startOnTimeline - spanMs),
+                        endOnTimeline: Math.max(0, clip.endOnTimeline - spanMs),
+                      }
+                    : clip;
+                  nextClips.push(shifted);
+                  continue;
+                }
+
+                const removesWhole = startMs <= clip.startOnTimeline && endMs >= clip.endOnTimeline;
+                if (removesWhole) continue;
+
+                const clipStart = clip.startOnTimeline;
+                const clipEnd = clip.endOnTimeline;
+                const sourceAt = (timelineMs: number): number => ms(clip.trimIn + (timelineMs - clipStart) * clip.speed);
+
+                if (startMs <= clipStart) {
+                  clip.startOnTimeline = Math.min(endMs, clipEnd);
+                  clip.trimIn = sourceAt(clip.startOnTimeline);
+                  if (ripple) {
+                    clip.startOnTimeline = startMs;
+                    clip.endOnTimeline = Math.max(startMs, clipEnd - spanMs);
+                  }
+                  nextClips.push(clip);
+                } else if (endMs >= clipEnd) {
+                  clip.endOnTimeline = Math.max(clipStart, startMs);
+                  clip.trimOut = sourceAt(clip.endOnTimeline);
+                  nextClips.push(clip);
+                } else {
+                  const right: Clip = {
+                    ...clip,
+                    id: uuidv4(),
+                    startOnTimeline: ripple ? startMs : endMs,
+                    endOnTimeline: ripple ? clipEnd - spanMs : clipEnd,
+                    trimIn: sourceAt(endMs),
+                    trimOut: clip.trimOut,
+                    linkedClipId: null,
+                  };
+                  clip.endOnTimeline = startMs;
+                  clip.trimOut = sourceAt(startMs);
+                  nextClips.push(clip, right);
+                }
+              }
+              track.clips = nextClips;
+            }
+            project.transitions = project.transitions.filter((transition) => {
+              const from = findClip(project, transition.fromClipId);
+              const to = findClip(project, transition.toClipId);
+              return Boolean(from && to);
+            });
+          };
+
+          const applyColor = (action: Extract<EditAction, { type: "add_effect" | "adjust_effect" }>): boolean => {
+            if (!["brightness", "contrast", "saturation"].includes(action.effect.kind)) {
+              warnings.push(`This command was understood, but ${action.effect.kind} is not supported yet.`);
+              return false;
+            }
+            const found = findClipForAction(project, action);
+            if (!found || found.track.type !== "video") {
+              warnings.push("No video clip was available for the color adjustment.");
+              return false;
+            }
+            const current = found.clip.colorGrade ?? { brightness: 0, contrast: 0, saturation: 0 };
+            const next: ColorGrade = { ...current };
+            const key = action.effect.kind as keyof ColorGrade;
+            next[key] = clamp(Math.round((next[key] ?? 0) + action.effect.value), -100, 100);
+            found.clip.colorGrade = next;
+            return true;
+          };
+
+          for (const action of plan.actions) {
+            if (action.type === "trim") {
+              const found = findClipForAction(project, action);
+              if (!found) {
+                warnings.push("No clip was available to trim.");
+                continue;
+              }
+              const startMs = ms(action.target.startTime * 1000);
+              const endMs = ms(action.target.endTime * 1000);
+              const { clip } = found;
+              const oldStart = clip.startOnTimeline;
+              const oldEnd = clip.endOnTimeline;
+              if (startMs > oldStart) clip.trimIn = ms(clip.trimIn + (startMs - oldStart) * clip.speed);
+              if (endMs < oldEnd) clip.trimOut = ms(clip.trimOut - (oldEnd - endMs) * clip.speed);
+              clip.startOnTimeline = startMs;
+              clip.endOnTimeline = endMs;
+              applied++;
+            } else if (action.type === "delete_range" || action.type === "cut") {
+              applyRangeDelete(ms(action.target.startTime * 1000), ms(action.target.endTime * 1000), action.type === "delete_range" && Boolean(action.rippleDelete));
+              applied++;
+            } else if (action.type === "add_transition") {
+              let found = action.target.clipId ? findClip(project, action.target.clipId) : null;
+              if (!found && action.target.time !== undefined) {
+                const atMs = ms(action.target.time * 1000);
+                for (const track of project.tracks) {
+                  if (track.type !== "video") continue;
+                  const ordered = [...track.clips].sort((a, b) => a.startOnTimeline - b.startOnTimeline);
+                  const clip = ordered.find((c) => c.startOnTimeline <= atMs && c.endOnTimeline >= atMs) ?? ordered.find((c) => c.endOnTimeline <= atMs);
+                  if (clip) {
+                    found = { clip, track };
+                    break;
+                  }
+                }
+              }
+              if (!found || found.track.type !== "video") {
+                warnings.push("No video clip was available for the transition.");
+                continue;
+              }
+              const ordered = [...found.track.clips].sort((a, b) => a.startOnTimeline - b.startOnTimeline);
+              const next = ordered[ordered.findIndex((clip) => clip.id === found!.clip.id) + 1];
+              if (!next) {
+                warnings.push("Transition needs a following clip on the same video track.");
+                continue;
+              }
+              const type = action.transition.kind === "fade" ? "crossfade" : action.transition.kind;
+              project.transitions.push({
+                id: uuidv4(),
+                trackId: found.track.id,
+                fromClipId: found.clip.id,
+                toClipId: next.id,
+                type,
+                durationMs: clamp(ms(action.transition.duration * 1000), 100, 5000),
+                params: {},
+              });
+              applied++;
+            } else if (action.type === "add_effect" || action.type === "adjust_effect") {
+              if (applyColor(action)) applied++;
+            } else if (action.type === "change_aspect_ratio") {
+              const dims = ASPECT_DIMS[action.aspectRatio];
+              if (!dims) {
+                warnings.push(`Aspect ratio ${action.aspectRatio} is not supported.`);
+                continue;
+              }
+              project.canvas.aspectRatio = action.aspectRatio;
+              project.canvas.width = dims.width;
+              project.canvas.height = dims.height;
+              applied++;
+            } else if (action.type === "add_zoom") {
+              const found = findClipForAction(project, action);
+              if (!found || found.track.type !== "video") {
+                warnings.push("No video clip was available for the zoom effect.");
+                continue;
+              }
+              found.clip.kenBurns = {
+                startScale: clamp(action.zoom.fromScale, 0.1, 5),
+                endScale: clamp(action.zoom.toScale, 0.1, 5),
+              };
+              applied++;
+            } else if (action.type === "adjust_audio") {
+              if (action.audio.volume !== undefined) {
+                const track = action.target?.trackId
+                  ? project.tracks.find((t) => t.id === action.target?.trackId)
+                  : project.tracks.find((t) => t.type === "audio" || t.type === "voiceover");
+                if (track && (track.type === "audio" || track.type === "voiceover")) {
+                  track.volume = clamp(Math.round(action.audio.volume), 0, 200);
+                  applied++;
+                } else {
+                  warnings.push("No audio track was available for volume adjustment.");
+                }
+              }
+              if (action.audio.mute) {
+                const startMs = action.target?.startTime !== undefined ? ms(action.target.startTime * 1000) : null;
+                const endMs = action.target?.endTime !== undefined ? ms(action.target.endTime * 1000) : null;
+                if (startMs !== null && endMs !== null) {
+                  // Explicit range → mute every audio/voiceover clip overlapping it.
+                  for (const track of project.tracks) {
+                    if (!isMediaTrack(track) || (track.type !== "audio" && track.type !== "voiceover")) continue;
+                    for (const clip of track.clips) {
+                      if (!(clip.startOnTimeline < endMs && clip.endOnTimeline > startMs)) continue;
+                      clip.gain = 0;
+                      applied++;
+                    }
+                  }
+                } else {
+                  // No range → mute the TARGETED clip's audio only (selection → playhead),
+                  // matching the grammar's "the clip's audio". Per-clip gain=0 is honored by
+                  // the export graph (buildFilterComplex §7.1), so preview == export holds.
+                  const target = resolveTargetClip(action.target?.clipId, ms(aiPlayheadMs));
+                  if (target) {
+                    target.clip.gain = 0;
+                    applied++;
+                  } else {
+                    warnings.push("No clip was available to mute.");
+                  }
+                }
+              }
+              if (action.audio.fadeIn !== undefined || action.audio.fadeOut !== undefined) {
+                const found = findClipForAction(project, action);
+                if (found) {
+                  if (action.audio.fadeIn !== undefined) found.clip.fadeInMs = ms(action.audio.fadeIn * 1000);
+                  if (action.audio.fadeOut !== undefined) found.clip.fadeOutMs = ms(action.audio.fadeOut * 1000);
+                  applied++;
+                } else {
+                  warnings.push("No clip was available for the audio fade.");
+                }
+              }
+            } else if (action.type === "add_caption") {
+              const track = project.captionTracks[0];
+              if (!track) {
+                warnings.push("No caption track exists in this project.");
+                continue;
+              }
+              const block: CaptionBlock = {
+                id: uuidv4(),
+                startMs: ms((action.caption.startTime ?? 0) * 1000),
+                endMs: ms((action.caption.endTime ?? ((action.caption.startTime ?? 0) + 3)) * 1000),
+                text: action.caption.text ?? "",
+              };
+              if (action.caption.style) block.styleOverride = action.caption.style;
+              track.blocks.push(block);
+              applied++;
+            } else if (action.type === "split_clip") {
+              // Split the targeted clip at the requested time into two clips, mirroring
+              // splitAtPlayhead's source-split math (asset-relative, honours speed).
+              const atMs = ms(action.target.time * 1000);
+              const found = resolveTargetClip(action.target.clipId, atMs);
+              if (!found) {
+                warnings.push("No clip selected or at the split time.");
+                continue;
+              }
+              const { clip, track } = found;
+              if (!(atMs > clip.startOnTimeline && atMs < clip.endOnTimeline)) {
+                warnings.push("The split time is outside the targeted clip.");
+                continue;
+              }
+              const offset = atMs - clip.startOnTimeline; // timeline ms into the clip
+              const sourceSplit = ms(clip.trimIn + offset * clip.speed);
+              const right: Clip = {
+                ...clip,
+                id: uuidv4(),
+                startOnTimeline: atMs,
+                endOnTimeline: clip.endOnTimeline,
+                trimIn: sourceSplit,
+                trimOut: clip.trimOut,
+                // AI split does not preserve A/V link grouping (single-clip op).
+                linkedClipId: null,
+              };
+              clip.endOnTimeline = atMs;
+              clip.trimOut = sourceSplit;
+              const idx = track.clips.findIndex((c) => c.id === clip.id);
+              track.clips.splice(idx + 1, 0, right);
+              applied++;
+            } else if (action.type === "move_clip") {
+              // Move the targeted clip so it starts at the requested time, preserving
+              // its duration. Resolution uses the start time as the playhead candidate.
+              const startMs = ms(action.target.startTime * 1000);
+              const found = resolveTargetClip(action.target.clipId, startMs);
+              if (!found) {
+                warnings.push("No clip selected or at playhead to move.");
+                continue;
+              }
+              const { clip } = found;
+              const durationMs = clip.endOnTimeline - clip.startOnTimeline;
+              clip.startOnTimeline = startMs;
+              clip.endOnTimeline = startMs + durationMs;
+              applied++;
+            } else if (action.type === "add_text_overlay") {
+              // AC-9: create a TextOverlay on the first overlay track, geometry from the
+              // 9-anchor map (default bottom-center). Mirrors `addTextOverlay`'s exact
+              // schema shape so preview==export holds (invariant / Risk 1).
+              let overlayTrack = project.tracks.find((t) => t.type === "overlay");
+              if (!overlayTrack || overlayTrack.type !== "overlay") {
+                // A fresh project has NO overlay track — create one so "add text" works on
+                // any project (the sample fixture shipped with an overlay track, which
+                // masked this in tests; found on a real blank project during QA).
+                const overlayIndex = project.tracks.filter((t) => t.type === "overlay").length + 1;
+                const createdTrack = makeTrack("overlay", overlayIndex);
+                project.tracks.push(createdTrack);
+                if (createdTrack.type !== "overlay") {
+                  errors.push("Could not create an overlay track for the text overlay.");
+                  continue;
+                }
+                overlayTrack = createdTrack;
+                mutatedStructure = true;
+              }
+              const geometry = resolvePositionGeometry(action.position);
+              const start = ms(aiPlayheadMs);
+              const overlay: TextOverlay = {
+                id: uuidv4(),
+                trackId: overlayTrack.id,
+                kind: "text",
+                startOnTimeline: start,
+                endOnTimeline: start + 3000,
+                canvasX: geometry.canvasX,
+                canvasY: geometry.canvasY,
+                width: geometry.width,
+                height: 15,
+                rotation: 0,
+                opacity: 100,
+                animation: {},
+                keyframes: {},
+                text: action.text,
+                style: {
+                  fontFamily: "sans-serif",
+                  fontSize: 48,
+                  fontWeight: 600,
+                  color: "#FFFFFF",
+                  align: "center",
+                  outline: { color: "#000000", width: 2, position: "outside" },
+                },
+              };
+              overlayTrack.clips.push(overlay);
+              mutatedStructure = true;
+              applied++;
+            } else if (action.type === "remove_silence") {
+              warnings.push("This command was understood, but automatic silence detection is not supported yet.");
+            } else {
+              warnings.push(`This command was understood, but ${action.type} is not supported yet.`);
+            }
+          }
+        });
+
+        // Invariant guard (Risk 1 / AC-9): a new apply branch that writes schema
+        // objects (the text overlay) must produce a project that still validates
+        // against project-schema, or preview==export could diverge at export. If the
+        // committed project is invalid, roll the whole atomic step back and surface
+        // the error instead of leaving a malformed clip on the timeline.
+        if (mutatedStructure) {
+          const check = validateProject(get().project);
+          if (!check.ok) {
+            get().undo();
+            errors.push("The text overlay was rejected by schema validation and was not applied.");
+            return { applied: 0, warnings, errors };
+          }
+        }
+
+        if (applied === 0 && warnings.length === 0) errors.push("No editable timeline item matched the command.");
+        return { applied, warnings, errors };
+      },
+
+      // ── Command Bar dry-run highlight (transient UI-only, NOT undoable) ──
+      setCommandDryRunRange: (range) =>
+        set((s) => {
+          s.commandDryRunRange = range;
+        }),
     };
   }),
 );

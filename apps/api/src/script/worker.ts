@@ -18,7 +18,7 @@ import { Worker, type Job, type ConnectionOptions } from 'bullmq';
 import { Redis } from 'ioredis';
 import { redisClient, type ScriptJobData } from '../queues.js';
 import { runGenerate, parsePlan } from './generate.js';
-import { isSketchStyle } from './sketch.js';
+import { isIllustrationStyle } from './sketch.js';
 
 export const SCRIPT_QUEUE = 'script';
 
@@ -40,7 +40,7 @@ async function publish(channel: string, payload: object): Promise<void> {
 async function processScriptJob(job: Job<ScriptJobData>): Promise<{ projectId: string }> {
   const { workspaceId, title, voiceId, withMusic } = job.data;
   const plan = parsePlan(job.data.plan);
-  const sketchStyle = isSketchStyle(job.data.sketchStyle) ? job.data.sketchStyle : null;
+  const sketchStyle = isIllustrationStyle(job.data.sketchStyle) ? job.data.sketchStyle : null;
 
   const { projectId } = await runGenerate(
     { workspaceId, title, plan, voiceId, withMusic, sketchStyle },

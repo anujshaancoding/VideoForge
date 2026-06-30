@@ -103,6 +103,9 @@ export default function Timeline() {
   const fps = useEditorStore((s) => s.project.canvas.frameRate);
   const durationMs = useEditorStore(selectProjectDurationMs);
   const projectId = useEditorStore((s) => s.project.id);
+  // Command Bar dry-run highlight (transient, UI-only). Read-only band over the
+  // ms range a completed command will affect (Design Brief §7.3/§8.6).
+  const commandDryRunRange = useEditorStore((s) => s.commandDryRunRange);
 
   const setPlayhead = useEditorStore((s) => s.setPlayhead);
   const select = useEditorStore((s) => s.select);
@@ -722,6 +725,23 @@ export default function Timeline() {
                 }}
               />
             ))}
+
+            {/* Command Bar dry-run highlight (Design Brief §7.3/§8.6): a read-only,
+                translucent SKY-BLUE band over the ms range a completed command will
+                affect. Pointer-transparent (never blocks clip interaction); uses the
+                same ms→px scale as clips/playhead. Transient UI-only state — set by the
+                Command Bar, cleared on cancel/apply/blur/Esc. */}
+            {commandDryRunRange && commandDryRunRange.endMs > commandDryRunRange.startMs && (
+              <div
+                aria-hidden="true"
+                data-testid="command-dry-run-band"
+                className="pointer-events-none absolute top-0 z-sticky h-full border-x border-vf-selection/50 bg-vf-selection/15"
+                style={{
+                  left: commandDryRunRange.startMs * pxPerMs,
+                  width: Math.max(2, (commandDryRunRange.endMs - commandDryRunRange.startMs) * pxPerMs),
+                }}
+              />
+            )}
 
             {/* Marquee rubber-band (sky-blue, translucent) while drag-selecting. */}
             {marquee && (

@@ -22,7 +22,7 @@ import { registerLocalFileAsAsset } from './assets.js';
 import { pickMusicBed } from './music.js';
 import { cleanupFile } from './fs.js';
 import { generateSceneSketches } from './sketchScenes.js';
-import type { SketchStyle } from './sketch.js';
+import type { IllustrationStyle } from './sketch.js';
 import {
   scenePlanSchema,
   assemblePlannedProject,
@@ -36,9 +36,10 @@ export interface GenerateInput {
   plan: ScenePlan;
   voiceId: string;
   withMusic: boolean;
-  /** When set, auto-generate one sketch image per scene (Draw Things → filter) and
-   *  place it on the b-roll track before persisting. Null/omitted → text-card video. */
-  sketchStyle?: SketchStyle | null;
+  /** When set, auto-produce one image per scene and place it on the b-roll track before
+   *  persisting: 'pen'|'graphite'|'color' → AI base + sketch filter; 'photo' → real web
+   *  image (search → AI fallback). Null/omitted → text-card video. */
+  sketchStyle?: IllustrationStyle | null;
 }
 
 export interface GenerateProgress {
@@ -149,6 +150,7 @@ export async function runGenerate(
       const sk = await generateSceneSketches(assembled.document, assembled.manifest, {
         workspaceId,
         style: sketchStyle,
+        title,
         // Map the 0..100 image progress onto the reserved 45..95 band.
         ...(onProgress
           ? {

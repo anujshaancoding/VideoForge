@@ -20,7 +20,7 @@ import { cx } from "../components/ui/cx.js";
 // and on commit clones the template document into a fresh project. Selection is
 // sky-blue (--vf-selection) — never amber (amber is reserved for the Export CTA).
 
-type RatioId = "9:16" | "16:9" | "1:1" | "4:5" | "custom";
+type RatioId = "9:16" | "16:9" | "1:1" | "4:5" | "4:3" | "custom";
 
 // ── CEO decision flip (ROADMAP Now #6) ──────────────────────────────────────────
 // The chooser is equal-weight with NO pre-selected default (CEO's call). The CEO's
@@ -44,6 +44,7 @@ const PRESETS: RatioPreset[] = [
   { id: "16:9", label: "Horizontal", hint: "YouTube · desktop", reactiveHint: "Horizontal · best for YouTube and desktop", width: 1920, height: 1080 },
   { id: "1:1", label: "Square", hint: "Instagram feed", reactiveHint: "Square · best for the Instagram feed", width: 1080, height: 1080 },
   { id: "4:5", label: "Portrait", hint: "Instagram portrait", reactiveHint: "Portrait · best for Instagram portrait posts", width: 1080, height: 1350 },
+  { id: "4:3", label: "Classic", hint: "presentations · TV", reactiveHint: "Classic 4:3 · presentations and standard/older video", width: 1440, height: 1080 },
   { id: "custom", label: "Custom", hint: "your size", reactiveHint: "Custom · set your own width and height", width: 1080, height: 1080 },
 ];
 
@@ -391,7 +392,7 @@ export default function NewProjectModal() {
           <div
             role="radiogroup"
             aria-label="Aspect ratio"
-            className="grid grid-cols-5 gap-2"
+            className="grid grid-cols-6 gap-2"
           >
             {PRESETS.map((preset, i) => (
               <RatioTile

@@ -74,9 +74,16 @@ export const VOICE_OPTIONS: VoiceOption[] = [
 
 export const DEFAULT_VOICE_ID = VOICE_OPTIONS[0]!.id;
 
-// ── Sketch visuals — auto-illustrate each scene at $0 (Draw Things → filter) ──────
-// 'none' leaves text-card-only video (bring your own footage via Auto-arrange).
-export type SketchStyle = 'none' | 'pen' | 'graphite' | 'color';
+// ── Scene visuals — auto-illustrate each scene ────────────────────────────────────
+// 'line'                   = minimal single-line ink art, AI base kept unfiltered (FLUX
+//                            renders the look; no sharp filter). The default — keeps the
+//                            image light so the narration + captions stay the hero.
+// 'pen'/'graphite'/'color' = AI base image stylised at $0 (filtered into one hand).
+// 'photo'                  = real web images, kept authentic (search → AI fallback) —
+//                            for scripts about real, named subjects (games, people,
+//                            brands) where a generated picture looks wrong.
+// 'none'                   = text-card-only video (bring your own footage via Arrange).
+export type SketchStyle = 'none' | 'line' | 'photo' | 'pen' | 'graphite' | 'color';
 
 export interface SketchStyleOption {
   id: SketchStyle;
@@ -85,13 +92,15 @@ export interface SketchStyleOption {
 }
 
 export const SKETCH_STYLE_OPTIONS: SketchStyleOption[] = [
+  { id: 'line', label: 'Line art', hint: 'Minimal ink, one line' },
+  { id: 'photo', label: 'Real photos', hint: 'Authentic web images' },
   { id: 'pen', label: 'Pen', hint: 'Ink line art' },
   { id: 'graphite', label: 'Pencil', hint: 'Graphite shading' },
   { id: 'color', label: 'Color', hint: 'Colored pencil' },
   { id: 'none', label: 'None', hint: 'Bring your own footage' },
 ];
 
-export const DEFAULT_SKETCH_STYLE: SketchStyle = 'pen';
+export const DEFAULT_SKETCH_STYLE: SketchStyle = 'line';
 
 // ── low-level request helper (mirrors lib/api.ts auth handling) ─────────────────
 

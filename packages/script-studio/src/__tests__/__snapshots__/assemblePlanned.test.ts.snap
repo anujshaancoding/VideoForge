@@ -289,7 +289,27 @@ exports[`assemblePlannedProject — determinism (golden) > matches a committed g
       {
         "clips": [
           {
-            "animation": {},
+            "animation": {
+              "typewriter": {
+                "words": [
+                  {
+                    "endMs": 1867,
+                    "startMs": 1200,
+                    "text": "Welcome",
+                  },
+                  {
+                    "endMs": 2533,
+                    "startMs": 1867,
+                    "text": "to",
+                  },
+                  {
+                    "endMs": 3200,
+                    "startMs": 2533,
+                    "text": "VideoForge.",
+                  },
+                ],
+              },
+            },
             "canvasX": 6,
             "canvasY": 72,
             "endOnTimeline": 3200,
@@ -318,7 +338,37 @@ exports[`assemblePlannedProject — determinism (golden) > matches a committed g
             "width": 88,
           },
           {
-            "animation": {},
+            "animation": {
+              "typewriter": {
+                "words": [
+                  {
+                    "endMs": 3450,
+                    "startMs": 3200,
+                    "text": "Paste",
+                  },
+                  {
+                    "endMs": 3700,
+                    "startMs": 3450,
+                    "text": "a",
+                  },
+                  {
+                    "endMs": 3950,
+                    "startMs": 3700,
+                    "text": "script",
+                  },
+                  {
+                    "endMs": 4200,
+                    "startMs": 3950,
+                    "text": "and",
+                  },
+                  {
+                    "endMs": 4450,
+                    "startMs": 4200,
+                    "text": "get",
+                  },
+                ],
+              },
+            },
             "canvasX": 6,
             "canvasY": 72,
             "endOnTimeline": 4450,
@@ -347,7 +397,22 @@ exports[`assemblePlannedProject — determinism (golden) > matches a committed g
             "width": 88,
           },
           {
-            "animation": {},
+            "animation": {
+              "typewriter": {
+                "words": [
+                  {
+                    "endMs": 5075,
+                    "startMs": 4450,
+                    "text": "a",
+                  },
+                  {
+                    "endMs": 5700,
+                    "startMs": 5075,
+                    "text": "draft.",
+                  },
+                ],
+              },
+            },
             "canvasX": 6,
             "canvasY": 72,
             "endOnTimeline": 5700,
@@ -376,7 +441,32 @@ exports[`assemblePlannedProject — determinism (golden) > matches a committed g
             "width": 88,
           },
           {
-            "animation": {},
+            "animation": {
+              "typewriter": {
+                "words": [
+                  {
+                    "endMs": 6450,
+                    "startMs": 5700,
+                    "text": "It",
+                  },
+                  {
+                    "endMs": 7200,
+                    "startMs": 6450,
+                    "text": "is",
+                  },
+                  {
+                    "endMs": 7950,
+                    "startMs": 7200,
+                    "text": "that",
+                  },
+                  {
+                    "endMs": 8700,
+                    "startMs": 7950,
+                    "text": "simple.",
+                  },
+                ],
+              },
+            },
             "canvasX": 6,
             "canvasY": 72,
             "endOnTimeline": 8700,

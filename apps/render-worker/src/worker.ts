@@ -583,13 +583,18 @@ export async function processRenderJob(
       tempFiles.push(watermarkPath);
     }
 
-    // 4c. Write one temp file per text overlay (mirrors the SRT write at 4a). The
-    //     drawtext stage reads each overlay's text via `textfile=` — content never
+    // 4c. Write one temp file per text TOKEN (mirrors the SRT write at 4a). The
+    //     drawtext stage reads each token's text via `textfile=` — content never
     //     touches the filtergraph tokeniser, so `:` `'` `%` `\` / newlines are safe
-    //     (§7.1). `overlayId` is a UUID, so the filename is filesystem-safe.
+    //     (§7.1). The filename MUST key on the unique token, not overlayId: a typewriter
+    //     overlay emits MANY tokens (one per reveal step) that share one overlayId, so
+    //     keying on overlayId collided them all onto one file (last write — the full-text
+    //     final step — won) and every step rendered the full caption. The token is
+    //     filesystem-safe (alphanumerics + `_` + the overlay UUID's hyphens).
     const textFilePaths = new Map<string, string>();
     for (const tf of buildResult.textFiles) {
-      const p = join(tmpdir(), `vf-overlaytext-${exportId}-${tf.overlayId}.txt`);
+      const safeToken = tf.token.replace(/[^A-Za-z0-9_-]/g, '');
+      const p = join(tmpdir(), `vf-overlaytext-${exportId}-${safeToken}.txt`);
       await writeFile(p, tf.text);
       tempFiles.push(p);
       textFilePaths.set(tf.token, p);

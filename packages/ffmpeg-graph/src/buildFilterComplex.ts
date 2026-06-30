@@ -58,6 +58,7 @@ import {
   underlineRule,
   DEFAULT_LINE_HEIGHT,
   clipFitScaleSteps,
+  getCharRevealSteps,
 } from "@videoforge/project-schema";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -637,14 +638,6 @@ function buildTextOverlayStage(
         fontsByFile.set(fontFile, font);
       }
 
-      // Text: written VERBATIM to the textfile (worker materialises it). Embedded "\n"
-      // are real newlines in the file → drawtext renders the multi-line block (§6.3). No
-      // escaping/trimming here — the preview uses the identical `text.split("\n")` rule, so
-      // the two sides' line boxes coincide; `textfile=` keeps the content out of the
-      // filtergraph tokeniser entirely (R3).
-      const textToken = `__VF_OVERLAYTEXT_${textOv.id}__`;
-      textFiles.push({ token: textToken, overlayId: textOv.id, text: textOv.text });
-
       // Colour + opacity: fontcolor alpha = whole-overlay opacity × the colour's own
       // alpha; the SAME product goes on the outline (`bordercolor`), reproducing the
       // canvas `globalAlpha` which scales both stroke and fill (§7.2).
@@ -669,20 +662,76 @@ function buildTextOverlayStage(
           ? `:borderw=${L.borderPx}:bordercolor=0x${parseHexColor(outline.color).hex}@${a}`
           : "";
 
-      const startSec = msToSec(textOv.startOnTimeline);
       const endSec = msToSec(textOv.endOnTimeline);
-      const out = `vtext${n}`;
 
-      // `expansion=none` so any `%{...}` in user text renders literally (R3). `textfile`
-      // keeps content out of the tokeniser; only the worker-controlled token is inline.
-      parts.push(
-        `[${current}]drawtext=fontfile=${font.token}:textfile=${textToken}:fontsize=${L.fontPx}:` +
-          `fontcolor=0x${hex}@${a}:x='${xExpr}':y='${yExpr}'${borderOpts}:` +
-          `line_spacing=${L.lineSpacing}:text_align=${textAlignLetter(textOv.style.align)}:` +
-          `expansion=none:enable='between(t,${startSec},${endSec})'[${out}]`,
-      );
-      current = out;
-      n += 1;
+      // ── Character-by-character typewriter reveal (Script Studio big-caption track) ──
+      // The SHARED `getCharRevealSteps` returns the ordered per-reveal-step schedule:
+      //   • No `animation.typewriter.words[]` (every overlay today) ⇒ a SINGLE step
+      //     { prefix: fullText, charStartMs: startOnTimeline, charEndMs: endOnTimeline }
+      //     ⇒ ONE drawtext whose `textfile`/`enable` are BYTE-IDENTICAL to the historical
+      //     static stage (enable='between(t,start,end)' under the un-indexed token).
+      //   • With timing ⇒ one step per DISTINCT reveal time (consecutive chars sharing a
+      //     reveal time collapse), so a 30-char caption costs ≈ word-count+1 stages, not
+      //     30 — the filter-budget guarantee Forge signed off on (DECISIONS 2026-06-27).
+      //
+      // BLOCKER-1/3 FIX (Forge review 2026-06-27): each step is bounded to its OWN window
+      // [charStartMs, charEndMs) — NOT a shared overlay-end bound. The schedule (incl. the
+      // end bound) comes ENTIRELY from getCharRevealSteps; the exporter never re-derives it.
+      // With per-step windows exactly ONE step is enabled at any t, so the single drawn
+      // prefix == getRevealedPrefix(t) — preview == export even for center/right align
+      // (where each prefix is centred on its own text_w and stacking them garbled glyphs).
+      //
+      // BOUNDARY CONVENTION (half-open [start,end)): FFmpeg `between` is inclusive on BOTH
+      // ends, but the preview's getRevealedPrefix uses `<= playheadMs`, so at t == nextStart
+      // the prefix that STARTS at the boundary must win. We therefore end every NON-FINAL
+      // step a sub-millisecond ε before the next step's start, so the boundary integer-ms
+      // frame falls ONLY in the starting step's window — no two steps are ever simultaneously
+      // enabled at any integer ms. ε = 0.0005s (half a ms) is < one frame at any sane fps and
+      // is below ms precision, so it can never collide with an integer-ms boundary. The FINAL
+      // step ends exactly at the overlay end (msToSec, no ε) — that is what keeps the static
+      // single-step path byte-identical to the historical stage.
+      const EPSILON_SEC = 0.0005;
+      const revealSteps = getCharRevealSteps(textOv);
+      const isStatic = revealSteps.length === 1;
+      revealSteps.forEach((step, si) => {
+        // Text token: the static (single-step) path KEEPS the historical token so its
+        // emitted graph is byte-for-byte the old one; multi-step uses a per-step token.
+        const textToken = isStatic
+          ? `__VF_OVERLAYTEXT_${textOv.id}__`
+          : `__VF_OVERLAYTEXT_${textOv.id}_${si}__`;
+        // Text written VERBATIM to the textfile (worker materialises it). Embedded "\n"
+        // are real newlines → drawtext renders the multi-line block (§6.3). `textfile=`
+        // keeps the content out of the filtergraph tokeniser entirely (R3). The static
+        // path writes the full text (step.prefix === overlay.text), identical to before.
+        textFiles.push({ token: textToken, overlayId: textOv.id, text: step.prefix });
+
+        // The reveal time is clamped to the overlay start (the helper guarantees the first
+        // step's charStartMs >= startOnTimeline), so the static step's start == the
+        // overlay start ⇒ `between(t,start,end)` is byte-identical to the old stage.
+        const stepStartSec = msToSec(step.charStartMs);
+        // End bound: the FINAL step (and the static single step) ends exactly at the
+        // overlay end via msToSec — byte-identical to the historical stage. Every NON-final
+        // step ends ε before the next step's start (half-open window) so the boundary frame
+        // belongs to the starting step (matching the preview's `<=`); see BOUNDARY CONVENTION.
+        const isFinalStep = si === revealSteps.length - 1;
+        const stepEndSec = isFinalStep
+          ? msToSec(step.charEndMs)
+          : (step.charEndMs / 1000 - EPSILON_SEC).toFixed(4).replace(/\.?0+$/, "") || "0";
+        const out = `vtext${n}`;
+
+        // `expansion=none` so any `%{...}` in user text renders literally (R3). `textfile`
+        // keeps content out of the tokeniser; only the worker-controlled token is inline.
+        parts.push(
+          `[${current}]drawtext=fontfile=${font.token}:textfile=${textToken}:fontsize=${L.fontPx}:` +
+            `fontcolor=0x${hex}@${a}:x='${xExpr}':y='${yExpr}'${borderOpts}:` +
+            `line_spacing=${L.lineSpacing}:text_align=${textAlignLetter(textOv.style.align)}:` +
+            `expansion=none:enable='between(t,${stepStartSec},${stepEndSec})'[${out}]`,
+        );
+        current = out;
+        n += 1;
+      });
+
+      const startSec = msToSec(textOv.startOnTimeline);
 
       // ── Underline rule (the underline milestone) ──────────────────────────────
       // drawtext cannot underline, so when `style.underline` is set we draw a FILLED

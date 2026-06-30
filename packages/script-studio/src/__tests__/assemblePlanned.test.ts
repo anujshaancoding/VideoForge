@@ -154,7 +154,28 @@ describe("assemblePlannedProject — export-subset guard (AC-6, WYCIWYG frontier
         }
         for (const f of forbidden) expect(f in card.style, `must not set "${f}"`).toBe(false);
         expect(card.rotation).toBe(0);
-        expect(card.animation).toEqual({});
+        // `animation` must carry ONLY keys the exporter actually renders. Today that is:
+        // {} (static) OR a `typewriter` reveal (the big-caption track) — both are driven
+        // by the SHARED captionTypewriter helper, so preview == export. Any OTHER animation
+        // key would be an export-dropped lie (in/out/loop presets are not yet rendered).
+        const animKeys = Object.keys(card.animation);
+        for (const k of animKeys) {
+          expect(k === "typewriter", `forbidden animation key "${k}"`).toBe(true);
+        }
+        if (card.animation.typewriter) {
+          // Shape guard: a non-empty words[] of timeline-absolute {text,startMs,endMs}.
+          expect(Array.isArray(card.animation.typewriter.words)).toBe(true);
+          expect(card.animation.typewriter.words.length).toBeGreaterThan(0);
+          for (const wd of card.animation.typewriter.words) {
+            expect(typeof wd.text).toBe("string");
+            expect(Number.isInteger(wd.startMs)).toBe(true);
+            expect(Number.isInteger(wd.endMs)).toBe(true);
+            expect(wd.endMs).toBeGreaterThanOrEqual(wd.startMs);
+            // Reveal windows stay inside the overlay's [startOnTimeline,endOnTimeline].
+            expect(wd.startMs).toBeGreaterThanOrEqual(card.startOnTimeline);
+            expect(wd.endMs).toBeLessThanOrEqual(card.endOnTimeline);
+          }
+        }
       }
     }
   });

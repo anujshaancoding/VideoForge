@@ -29,6 +29,21 @@ Sentry.init({
 // VideoForge web entry point. Mounts the app into #root. The dark theme is the only
 // theme for MVP — the `dark` class + color-scheme are set on <html> in index.html.
 
+// ── DEV-only QA hook ─────────────────────────────────────────────────────────
+// Exposes the auth + editor stores on window so an automated QA session can drive
+// the editor without standing up auth/DB (no account, no password). Gated to
+// `import.meta.env.DEV` so it never ships in a production build.
+if (import.meta.env.DEV) {
+  void Promise.all([import("./store/authStore.js"), import("./store/editorStore.js")]).then(
+    ([auth, editor]) => {
+      (window as unknown as Record<string, unknown>)["__vf"] = {
+        useAuthStore: auth.useAuthStore,
+        useEditorStore: editor.useEditorStore,
+      };
+    },
+  );
+}
+
 const container = document.getElementById("root");
 if (!container) {
   throw new Error("VideoForge: #root element not found in index.html");

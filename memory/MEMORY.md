@@ -1,2 +1,5 @@
+- [VideoForge dev startup](videoforge-dev-startup.md) — API (:4000) is separate from web (:5173) and gates the whole app; how to boot + verify
+- [Web test-suite rot](web-test-suite-rot.md) — apps/web vitest has pre-existing stale-test failures (not product bugs); CI is red, don't trust background exit codes
 - [Script Studio sketch images](script-studio-sketch-images.md) — $0 script→sketch-video: Draw Things base image + sharp sketch filter, SHIPPED into /generate + /sketch (default pen)
 - [Script Studio proof harness](script-studio-proof-harness.md) — where the /tmp/sketch-proof OpenCV reference + sample outputs live
+- [Curated-asset video pipeline](curated-asset-video-pipeline.md) — pivot to sourcing REAL assets (retrieval) over AI-gen; Valorant niche first (valorant-api pack shipped), 9:16, audience-first

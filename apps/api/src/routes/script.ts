@@ -25,7 +25,11 @@ import { runGenerate, parsePlan } from '../script/generate.js';
 import { arrangeAssets } from '../script/l1.js';
 import type { PlacedAsset, PlannedScriptManifest } from '../script/l1.js';
 import { generateSceneSketches } from '../script/sketchScenes.js';
-import { isSketchStyle, DEFAULT_SKETCH_STYLE, type SketchStyle } from '../script/sketch.js';
+import {
+  isIllustrationStyle,
+  DEFAULT_ILLUSTRATION_STYLE,
+  type IllustrationStyle,
+} from '../script/sketch.js';
 
 /** Max script length accepted at /plan (bounds Groq tokens + heuristic work). */
 const MAX_SCRIPT_CHARS = 20000;
@@ -41,7 +45,8 @@ interface GenerateBody {
   plan?: unknown;
   voiceId?: unknown;
   withMusic?: unknown;
-  /** 'pen' | 'graphite' | 'color' — auto-illustrate scenes; absent/invalid → none. */
+  /** 'line' | 'pen' | 'graphite' | 'color' | 'photo' — auto-illustrate scenes;
+   *  absent/invalid → none (text-card video). 'line' (default look) = minimal ink art. */
   sketchStyle?: unknown;
 }
 interface ArrangeBody {
@@ -89,8 +94,9 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
     const voiceId =
       typeof body.voiceId === 'string' ? body.voiceId.trim() : '';
     const withMusic = body.withMusic === true;
-    // Optional auto-illustrate style; an invalid/absent value means "no sketches".
-    const sketchStyle: SketchStyle | null = isSketchStyle(body.sketchStyle)
+    // Optional auto-illustrate style ('pen'|'graphite'|'color' sketch, or 'photo' real
+    // web images); an invalid/absent value means "no images" (text-card video).
+    const sketchStyle: IllustrationStyle | null = isIllustrationStyle(body.sketchStyle)
       ? body.sketchStyle
       : null;
 
@@ -251,7 +257,9 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Body: SketchBody }>('/sketch', async (request, reply) => {
     const body = request.body ?? {};
     const projectId = typeof body.projectId === 'string' ? body.projectId : '';
-    const style: SketchStyle = isSketchStyle(body.style) ? body.style : DEFAULT_SKETCH_STYLE;
+    const style: IllustrationStyle = isIllustrationStyle(body.style)
+      ? body.style
+      : DEFAULT_ILLUSTRATION_STYLE;
     if (!projectId) {
       return reply
         .code(400)
@@ -286,8 +294,13 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
     const manifest = manRow.manifest as PlannedScriptManifest;
     const document = projRow.document as Project;
 
-    // Generate + place (registers photo assets, runs pure L1 placement).
-    const sketched = await generateSceneSketches(document, manifest, { workspaceId, style });
+    // Generate + place (registers photo assets, runs pure L1 placement). The project
+    // title anchors photo-mode web searches to the script's topic.
+    const sketched = await generateSceneSketches(document, manifest, {
+      workspaceId,
+      style,
+      title: document.title,
+    });
 
     const result = validateProject(sketched.document);
     if (!result.ok) {

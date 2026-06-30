@@ -1,0 +1,92 @@
+{
+  "id": "weapon-vs-weapon",
+  "title": "Vandal vs Phantom — Which Should You Buy?",
+  "voiceId": "af_heart",
+  "canvas": {
+    "width": 1080,
+    "height": 1920,
+    "frameRate": 30
+  },
+  "scenes": [
+    {
+      "sceneIndex": 0,
+      "voiceoverText": "Vandal or Phantom — the debate that never ends. Let the stats settle it.",
+      "smallCaption": "Vandal or Phantom?",
+      "brollSuggestion": {
+        "mediaType": "photo",
+        "keywords": [
+          "vandal",
+          "phantom"
+        ],
+        "description": "Vandal or Phantom?"
+      },
+      "framePath": "/Users/anujshaan/Workspace/02_PERSONAL/studio.Zentrix/VideoForge/assets/valorant/storyboards/weapon-vs-weapon/scene-0.png"
+    },
+    {
+      "sceneIndex": 1,
+      "voiceoverText": "The Vandal one-taps. A hundred and sixty to the head at any range. The Phantom drops to a hundred and fifty-six past fifteen meters.",
+      "smallCaption": "Damage",
+      "brollSuggestion": {
+        "mediaType": "photo",
+        "keywords": [
+          "damage"
+        ],
+        "description": "Damage"
+      },
+      "framePath": "/Users/anujshaan/Workspace/02_PERSONAL/studio.Zentrix/VideoForge/assets/valorant/storyboards/weapon-vs-weapon/scene-1.png"
+    },
+    {
+      "sceneIndex": 2,
+      "voiceoverText": "But the Phantom fires faster. Eleven rounds a second against the Vandal nine point seven five. More bullets, more forgiveness.",
+      "smallCaption": "Fire rate",
+      "brollSuggestion": {
+        "mediaType": "photo",
+        "keywords": [
+          "fire rate"
+        ],
+        "description": "Fire rate"
+      },
+      "framePath": "/Users/anujshaan/Workspace/02_PERSONAL/studio.Zentrix/VideoForge/assets/valorant/storyboards/weapon-vs-weapon/scene-2.png"
+    },
+    {
+      "sceneIndex": 3,
+      "voiceoverText": "It also carries thirty in the mag against twenty-five, with a silencer that hides your tracers.",
+      "smallCaption": "Magazine",
+      "brollSuggestion": {
+        "mediaType": "photo",
+        "keywords": [
+          "magazine"
+        ],
+        "description": "Magazine"
+      },
+      "framePath": "/Users/anujshaan/Workspace/02_PERSONAL/studio.Zentrix/VideoForge/assets/valorant/storyboards/weapon-vs-weapon/scene-3.png"
+    },
+    {
+      "sceneIndex": 4,
+      "voiceoverText": "And the price is identical. Twenty-nine hundred credits each. So it comes down to your style.",
+      "smallCaption": "Same price",
+      "brollSuggestion": {
+        "mediaType": "photo",
+        "keywords": [
+          "cost"
+        ],
+        "description": "Same price"
+      },
+      "framePath": "/Users/anujshaan/Workspace/02_PERSONAL/studio.Zentrix/VideoForge/assets/valorant/storyboards/weapon-vs-weapon/scene-4.png"
+    },
+    {
+      "sceneIndex": 5,
+      "voiceoverText": "One-tap consistency, or spray control and stealth. Which one do you run? Tell me in the comments, and follow for more.",
+      "smallCaption": "Your pick?",
+      "brollSuggestion": {
+        "mediaType": "photo",
+        "keywords": [
+          "vandal",
+          "phantom"
+        ],
+        "description": "Your pick?"
+      },
+      "framePath": "/Users/anujshaan/Workspace/02_PERSONAL/studio.Zentrix/VideoForge/assets/valorant/storyboards/weapon-vs-weapon/scene-5.png"
+    }
+  ]
+}

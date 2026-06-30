@@ -1,11 +1,16 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { render, screen, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router-dom";
 import { newProject, type Project } from "@videoforge/project-schema";
 import { selectProjectDurationMs, useEditorStore } from "../../../store/editorStore.js";
 import TopBar from "../TopBar.js";
 
 const get = () => useEditorStore.getState();
+
+// TopBar calls useNavigate(), so it must render inside a Router (it always does in the
+// real app). Wrap every render so the hook has its router context.
+const renderTopBar = () => render(<TopBar />, { wrapper: MemoryRouter });
 
 /** A fresh, empty project (one video track, zero clips → durationMs === 0). */
 function emptyProject(): Project {
@@ -18,7 +23,7 @@ beforeEach(() => {
 
 describe("TopBar export gate (ROADMAP Now #6)", () => {
   it("renders Export aria-disabled (NOT bare disabled) when the timeline is empty", () => {
-    render(<TopBar />);
+    renderTopBar();
     const exportBtn = screen.getByRole("button", { name: /export/i });
     // aria-disabled keeps it in the focus order for axe (Sentinel's check) — it must
     // NOT carry the native `disabled` attribute, which would remove it from focus.
@@ -27,14 +32,14 @@ describe("TopBar export gate (ROADMAP Now #6)", () => {
   });
 
   it("does not open the Export modal while gated (durationMs === 0)", async () => {
-    render(<TopBar />);
+    renderTopBar();
     await userEvent.click(screen.getByRole("button", { name: /export/i }));
     // The modal title is only present once the dialog opens.
     expect(screen.queryByRole("dialog", { name: /export video/i })).not.toBeInTheDocument();
   });
 
   it("transitions to enabled (grey → amber) once a clip gives the project a duration", async () => {
-    render(<TopBar />);
+    renderTopBar();
     const exportBtn = screen.getByRole("button", { name: /export/i });
     expect(exportBtn).toHaveAttribute("aria-disabled", "true");
 
@@ -56,7 +61,7 @@ describe("TopBar export gate (ROADMAP Now #6)", () => {
     act(() => {
       get().addClipFromAsset("asset-1", trackId, 0, 4000);
     });
-    render(<TopBar />);
+    renderTopBar();
     await userEvent.click(screen.getByRole("button", { name: /export/i }));
     expect(screen.getByRole("dialog", { name: /export video/i })).toBeInTheDocument();
   });

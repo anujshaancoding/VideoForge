@@ -1,0 +1,90 @@
+{
+  "id": "top5-duelists",
+  "title": "Top 5 Duelists in Valorant",
+  "voiceId": "af_heart",
+  "canvas": {
+    "width": 1080,
+    "height": 1920,
+    "frameRate": 30
+  },
+  "scenes": [
+    {
+      "sceneIndex": 0,
+      "voiceoverText": "These are the top five duelists in Valorant right now. Number five might surprise you.",
+      "smallCaption": "Top 5 Duelists",
+      "brollSuggestion": {
+        "mediaType": "photo",
+        "keywords": [
+          "duelists"
+        ],
+        "description": "Top 5 Duelists"
+      },
+      "framePath": "/Users/anujshaan/Workspace/02_PERSONAL/studio.Zentrix/VideoForge/assets/valorant/storyboards/top5-duelists/scene-0.png"
+    },
+    {
+      "sceneIndex": 1,
+      "voiceoverText": "At number five, Yoru. High skill, high reward — his teleports punish anyone who is not watching.",
+      "smallCaption": "#5 Yoru",
+      "brollSuggestion": {
+        "mediaType": "photo",
+        "keywords": [
+          "yoru"
+        ],
+        "description": "#5 Yoru"
+      },
+      "framePath": "/Users/anujshaan/Workspace/02_PERSONAL/studio.Zentrix/VideoForge/assets/valorant/storyboards/top5-duelists/scene-1.png"
+    },
+    {
+      "sceneIndex": 2,
+      "voiceoverText": "Number four, Phoenix. Self-sufficient and flashy — he even heals himself with his own molly.",
+      "smallCaption": "#4 Phoenix",
+      "brollSuggestion": {
+        "mediaType": "photo",
+        "keywords": [
+          "phoenix"
+        ],
+        "description": "#4 Phoenix"
+      },
+      "framePath": "/Users/anujshaan/Workspace/02_PERSONAL/studio.Zentrix/VideoForge/assets/valorant/storyboards/top5-duelists/scene-2.png"
+    },
+    {
+      "sceneIndex": 3,
+      "voiceoverText": "Number three, Reyna. Pure fragging power — get a kill and she becomes almost untouchable.",
+      "smallCaption": "#3 Reyna",
+      "brollSuggestion": {
+        "mediaType": "photo",
+        "keywords": [
+          "reyna"
+        ],
+        "description": "#3 Reyna"
+      },
+      "framePath": "/Users/anujshaan/Workspace/02_PERSONAL/studio.Zentrix/VideoForge/assets/valorant/storyboards/top5-duelists/scene-3.png"
+    },
+    {
+      "sceneIndex": 4,
+      "voiceoverText": "Number two, Raze. The most explosive entry in the game — nobody clears a corner faster.",
+      "smallCaption": "#2 Raze",
+      "brollSuggestion": {
+        "mediaType": "photo",
+        "keywords": [
+          "raze"
+        ],
+        "description": "#2 Raze"
+      },
+      "framePath": "/Users/anujshaan/Workspace/02_PERSONAL/studio.Zentrix/VideoForge/assets/valorant/storyboards/top5-duelists/scene-4.png"
+    },
+    {
+      "sceneIndex": 5,
+      "voiceoverText": "And number one, Jett. Dash, updraft, and the deadliest knife ultimate in Valorant. The duelist standard. Do you agree?",
+      "smallCaption": "#1 Jett",
+      "brollSuggestion": {
+        "mediaType": "photo",
+        "keywords": [
+          "jett"
+        ],
+        "description": "#1 Jett"
+      },
+      "framePath": "/Users/anujshaan/Workspace/02_PERSONAL/studio.Zentrix/VideoForge/assets/valorant/storyboards/top5-duelists/scene-5.png"
+    }
+  ]
+}

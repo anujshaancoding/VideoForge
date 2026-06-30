@@ -8,6 +8,153 @@ Gate types: 💰 money · 🧭 scope · 🚀 release/publish · ⚠️ irreversi
 
 ## 🔴 Open — needs CEO decision
 
+### 2026-06-27 🧭 Typewriter captions synced to voiceover — Script Studio (scope gate)
+- **Raised by:** Atlas (CEO asked for the script→video flow to end with "big typewriter caption
+  animation popping on screen synced with voiceover"). Build-loop ran and **halted at Scope**.
+- **Vera's ruling: OUT of MVP as framed (character-by-character typewriter), on 3 independent grounds:**
+  1. `MVP_Scope.md §3.5` marks **karaoke highlight = Phase 2**; a per-character reveal synced to audio is
+     functionally karaoke. `§3.6` marks **text entry/exit animation presets = Phase 2**. Either cut alone disqualifies.
+  2. **WYCIWYG-invariant risk:** requires touching BOTH PreviewEngine and `buildFilterComplex`. FFmpeg has no
+     per-character primitive → character-level needs hundreds of time-windowed `drawtext` stages (O(N) blowup).
+     The golden-frame SSIM gate would need a new fixture class; not yet green for this.
+  3. **Layered on an already-gated feature** — Script Studio is itself a 🧭 pull (already in this log); a
+     sub-feature inherits the gate and must be evaluated separately.
+- **In scope already (unaffected):** static burned-in captions (subtitles filter, whole-block), hand-authored
+  caption blocks, the `words[]` array on CaptionBlock (present, populated by Script Studio VO).
+- **Atlas recommendation — APPROVE a de-scoped v1:**
+  - **Word-level** reveal (not character): each word appears at its `word.startMs`, stays for the rest of the
+    block → maps cleanly to one `drawtext enable=between(...)` per word (~30 stages for a 30-word block, fine).
+  - Scoped **only** to Script Studio's big-caption overlay track — core CaptionTrack/subtitles path untouched.
+  - **Shared pure helper** in `project-schema` drives both preview + exporter (cannot diverge).
+  - New golden fixture class `caption-typewriter` (SSIM ≥ 0.985 / PSNR ≥ 38 dB) required before merge;
+    Forge signs off the `enable=` approach as parity-safe first. Absent `words[]` ⇒ byte-identical to today.
+  - **True character-level typewriter stays Phase 2** until word-level is proven + gate is green.
+- **Awaiting CEO:** (A) approve word-level v1 as above, (B) approve full character-level now (higher invariant
+  risk), or (C) defer entirely to Phase 2.
+- **✅ CEO DECIDED (2026-06-27): (B) full character-level typewriter, now.** CEO accepts the WYCIWYG-parity
+  risk. Mandatory guardrails carried into the build: (1) shared **pure helper in `project-schema`** computes
+  the revealed substring at a given `playheadMs` — preview + exporter both consume it, cannot diverge;
+  (2) new golden fixture class **`caption-typewriter`** (char-level + word-timed cases), **SSIM ≥ 0.985 /
+  PSNR ≥ 38 dB required before merge**; (3) **Forge signs off** the FFmpeg `drawtext enable=` strategy as
+  parity-safe AND within the filter-complexity budget before Reel builds the exporter side; (4) absent
+  `words[]` ⇒ byte-identical to today (no regression); (5) scoped to Script Studio big-caption overlay track
+  only — core CaptionTrack/subtitles path untouched; (6) brand: no amber #FF7A1A in caption text, no purple.
+  Build loop re-launched with the gate cleared.
+- **✅ FORGE SIGN-OFF (2026-06-27) — `drawtext enable=` strategy is parity-safe + within budget.**
+  Reviewed the exporter design before Reel wired `buildFilterComplex`:
+  - **(a) Parity-safe.** Each reveal step burns one `drawtext` whose
+    `enable='between(t,charStartSec,overlayEndSec)'` turns its prefix on at the char's reveal time
+    and holds it to the overlay end. Steps chain longest-prefix-LAST, so at any `t` the longest
+    revealed prefix is drawn on top — exactly the string the SHARED `getRevealedPrefix` returns to
+    the preview at that playhead. `between` is the same idiom already trusted for clip overlays + the
+    existing text drawtext; its inclusive-end vs the canvas's `< end` differs by ≤1 frame (below the
+    golden sampling resolution — fixtures sample strictly inside the window). Preview == export by
+    construction (one shared helper, no second copy of the reveal math).
+  - **(b) Filter budget OK for a 30-char caption.** `getCharRevealSteps` COLLAPSES consecutive chars
+    that share a reveal time into one step, so the stage count tracks distinct reveal times
+    (≈ word boundaries + per-char spread inside words), never an unbounded blowup; it is hard-bounded
+    by `text.length` and is deterministic. A 30-char / ~6-word caption emits a couple dozen short
+    `drawtext` stages — well inside the render-worker's single FFmpeg invocation limits (the template
+    graphs already emit 5–6 zoompan + xfade + eq chains per project without issue). Sentinel unit test
+    asserts the bound (`parts.length <= text.length`).
+  - **(c) No tokenizer issues.** Text still flows through `textfile=` (worker-materialised temp file),
+    so user content NEVER reaches the filtergraph tokeniser — the entire `:`/`'`/`%`/`\`/newline escape
+    class stays neutralised exactly as today. `enable=` bodies are pure `between(t,N,N)` arithmetic with
+    numeric, monotonic, non-negative bounds and no special chars (Sentinel test asserts this).
+  - **Backward-compat preserved:** absent `animation.typewriter.words[]` ⇒ a single step with the
+    historical `__VF_OVERLAYTEXT_<id>__` token and `enable='between(t,start,end)'` ⇒ byte-identical
+    filter_complex to the prior static stage (existing text/overlay goldens unchanged; verified by the
+    full ffmpeg-graph suite staying green). Reel cleared to build the exporter side. ✅ DONE.
+- **⚠️ BUILD-LOOP REVIEW (2026-06-27) — Forge caught an invariant break in the as-built exporter →
+  CHANGES-NEEDED.** The full build-loop ran (Pixel preview + Reel exporter + Sentinel tests). Sentinel
+  said SHIP, but Forge's final review overruled it: the exporter chained every reveal step with the
+  **same** `endSec`, so all prefixes with `charStart ≤ t` draw simultaneously. For **center-aligned**
+  text (which the big-captions use) each prefix centres independently → ghosted/garbled glyphs in the
+  EXPORT that the preview never shows = WYCIWYG break. Fix (Forge Option A): bound each step to the next
+  step's start so exactly one prefix shows at a time, matching `getRevealedPrefix`; expose `charEndMs`
+  from the shared helper so the exporter doesn't re-derive timing; rewrite the unit test that encoded the
+  bug. NOT a scope/CEO matter — engineering defect with a clear fix. **Atlas dispatched Reel to fix it.**
+- **✅ FIXED + VERIFIED LOCALLY (2026-06-27).** Forge Option A implemented: `RevealStep` gains `charEndMs`
+  (= next step's start; final step = overlay end); the exporter bounds each drawtext to its OWN half-open
+  window `between(t, charStartMs/1000, charEndMs/1000 − ε)` (ε=0.0005s, sub-ms so it never collides with an
+  integer-ms boundary; the boundary frame falls only in the STARTING step's window, matching the preview's
+  `<=`). Exactly one prefix shows at any t ⇒ preview==export even for centre-align. Static single-step path
+  still ends exactly at overlay end ⇒ byte-identical to the historical stage. The two tests that ENCODED the
+  bug were rewritten to assert non-overlapping windows + prefix==getRevealedPrefix parity. Green:
+  project-schema 84/84 (typewriter 11/11), ffmpeg-graph 89 pass +22 golden-skipped (typewriter 12/12),
+  script-studio 70/70, whole-repo typecheck clean. (Reel agent stalled mid-verify on a watchdog; Atlas
+  finished the test rewrites + verification.) **REMAINING: generate the `caption-typewriter` golden PNGs on
+  the pinned-FFmpeg 6.1.1 + Inter CI image so the SSIM/PSNR gate actually runs (vacuous until then); optional
+  Forge re-review of the final diff.** Nothing here is a CEO gate.
+- **✅ END-TO-END VERIFIED IN A REAL MP4 (2026-06-28).** Drove a live 3-scene `line` render through the
+  actual stack (signup→/generate→/exports→download) + extracted frames via ffmpeg in the worker. Confirmed:
+  line-art images (match CEO reference), voiceover (AAC), and the **typewriter typing char-by-char**
+  (0.10s "St" → 0.40s "Start y" → 0.70s "Start your m" → 1.10s "Start your morning"). The E2E pass caught
+  a **real worker bug** unit tests missed: `apps/render-worker/src/worker.ts` keyed each overlay text-file on
+  `overlayId`, so a typewriter overlay's many per-step tokens collided onto one file → every frame showed the
+  FULL caption. **Fixed** (key on the unique token), rebuilt the worker image, re-rendered, verified. Also
+  found a **deploy-ordering risk**: the worker runs a BAKED image and HARD-FAILS export §18 validation on the
+  new `animation.typewriter` field if not rebuilt with the schema → worker must deploy with/before the API
+  (flag to Anchor). FOLLOW-UPS (non-gating): render-worker regression test (distinct file per token) +
+  Reel/Forge review of the worker fix + the CI golden-PNG generation.
+
+### 2026-06-27 🧭 Command Editing — structured typeahead edit bar (scope gate; spike running)
+- **Raised by:** Atlas (CEO asked to research + build "text to edit/create video" — type a command,
+  pick from autocomplete suggestions; action → property → value [→ position]).
+- **Context:** A working free-text AI Edit Bar already exists uncommitted on this branch
+  (`apps/web/src/ai-edit/` engine — parser/validation/`applyAIEditPlan` — + `AIEditCommandBar`, 19 tests
+  green, mounted in Editor). CEO's vision upgrades the *input*: replace free-text English with a
+  **structured, autocomplete-driven slot grammar** (select tokens, not type sentences).
+- **Phase A done (this session):** Vera PRD → `docs/PRD_Command_Editing_v1.md`; Iris interaction design
+  → `docs/Command_Editing_Design_Brief.md`. Both aligned: one grammar-config object drives dropdown +
+  parser (anti-drift), grammar-first/**no LLM/$0/offline**, target resolved via selection/playhead (never
+  language), preview-before-apply + one-atomic-undo. Scout market sweep: nobody in video ships a structured
+  command-grammar editor (field = transcript-docs vs free-form-LLM) → genuine differentiation.
+- **Why a gate:** `docs/MVP_Scope.md §2` says "MVP is NOT AI-assisted." This rides on the prior
+  AI Edit Bar pull (CEO-approved 2026-06-25), so Vera classifies it **🧭 UI-shell expansion on an
+  already-approved Phase-1 feature** — client-side only, no schema/ffmpeg-graph/backend/cost change.
+  Recommendation: **approve the build.**
+- **Atlas proceeding (bounded-autonomy, reversible):** Phase B is a **de-risking spike only** — new
+  component behind a flag, old bar untouched, anchors-only, no merge — to prove the typeahead "feels like
+  typing." Production build/merge waits on CEO sign-off below.
+- **✅ CEO DECIDED (2026-06-27):** **(go)** build the production version NOW, merge-ready — close the
+  split/move parser gaps, build `add text overlay` (new action type + apply branch, Forge-reviewed for
+  invariant + golden test), wire the dry-run timeline highlight, Sentinel a11y/AC pass. **(Q2)** replace
+  the free-text bar **outright** (remove flag + old textarea). **(Q3)** position = **9 named anchors only**
+  (no raw x/y in v1; Inspector covers precise placement). **(Q5)** **rename off "AI"** → user-facing
+  **"Command Bar"** (deterministic, not AI); internal feature name "Command Editing". (Q1 sequencing /
+  Q4 history-recall: history deferred to v2 per PRD; build proceeds in parallel — `apps/web`-only, can't
+  affect golden-frame gate.)
+- **Status (2026-06-27 EOD):** ✅ **Phase C built + END-TO-END VERIFIED + bug-fixed. Not committed.**
+  Engine (split/move/add-text-overlay) + UI (structured typeahead bar, default; old free-text bar deleted;
+  renamed "Command Bar"; dry-run highlight). Forge invariant review = PASS. **Atlas then wrote a real
+  end-to-end harness** (`apps/web/src/ai-edit/__tests__/e2e.userflow.test.ts`) driving the TRUE user path
+  — type → autocomplete → pick → serialize → parse → validate → apply → **export preflight
+  (`buildExportDocument`, the same one the Export button runs)** — across 3 full "make a video" sessions +
+  edge cases. **It caught real bugs the unit tests missed:**
+  - 🐞 **FIXED — single-option property dead-end:** typing `trim 0:01 to 0:03` / `split 0:20` / `delete …`
+    / `set 80%` previously DEAD-ENDED the dropdown (forced an extra pick of an obvious "clip"/"range"/
+    "volume" step). This broke exactly the CEO's examples. Fix: `resolveImpliedSlots` auto-fills a sole
+    property so the value slot is reached directly (suggest.ts) — fluid typing now works.
+  - 🐞 **FIXED — caption placeholder lied:** it advertised a timed syntax (`"…" from 0:02 to 0:05`) the
+    value parser rejects. Placeholder corrected.
+  - ✅ Verified good: trim/split/delete/move/color/aspect/zoom/text-overlay/volume all apply AND keep the
+    project export-valid; orphaned transitions cleaned on whole-clip delete; out-of-range/inverted ranges
+    rejected; text overlay is schema-valid + reaches export `drawtext`.
+- **QA pass + ALL-FIXED round (2026-06-27, later):** Research-backed test plan
+  (`docs/Command_Bar_Test_Plan.md` — Canva/CapCut taxonomy → 50+ cases) run via REAL browser
+  (Claude-in-Chrome, DEV-only `qa-sample` bypass; no account/password) + the e2e harness. Found 5 issues,
+  **fixed ALL 5:** (D-1) single-option dead-end → `resolveImpliedSlots`; LIVE fluid-typing confirmed.
+  (D-2) caption placeholder → corrected. (D-3) `mute` was global → now scoped to the targeted clip's gain
+  (export graph honors per-clip gain); LIVE-verified `musicGain=0 voiceGain=100`. (D-4) Cancel kept stale
+  pills → `resetBar()`. (D-5) timed captions impossible via bar → value slot accepts `"…" from A to B`.
+  LIVE-confirmed in-browser: typeahead, fluid typing, pills, parsed-value pin, preview→apply (store-checked),
+  undo, destructive warning + "Confirm delete", out-of-range rejection (Apply disabled), 9-grid numpad
+  picker, sky-blue CTA, no console errors. **118 feature tests + new assertions green, typecheck+lint clean,
+  full web suite 299 pass / 7 pre-existing rot.** Dev hooks (`main.tsx`+`Editor.tsx`, DEV-gated) added for
+  QA — keep or strip on request. **Still uncommitted — awaiting CEO.**
+- **Decided by:** Anuj (CEO) via session Q&A; executed by Atlas.
+
 ### 2026-06-15 🧭 Script Studio v2 — "auto video from a script" (CEO-directed, building today)
 - **Raised by:** Atlas (CEO asked for end-to-end auto-video-from-script TODAY).
 - **Scope (CEO-greenlit live, 2026-06-15):** paste script → **Groq LLM** scene-plan that *names the
@@ -213,6 +360,14 @@ Gate types: 💰 money · 🧭 scope · 🚀 release/publish · ⚠️ irreversi
 ---
 
 ## ✅ Log — decided
+
+### 2026-06-25 🧭 AI Edit Command Bar — prompt-based timeline editing
+- **Context:** CEO requested Prompt-Based Video Editing / "Cursor for video editing": natural-language
+  commands become structured, validated edit plans that apply to the existing project/timeline state.
+  This is explicitly outside Phase 0's "Not AI-assisted" boundary, so it is logged as a scope pull.
+- **Decision:** ✅ Approved by CEO request. Bounded implementation: local rule parser first, LLM adapter
+  seam disabled until keys/client exist, compact metadata-only context, validation before apply, no direct
+  arbitrary state mutation, and AI edits go through the editor store/history.
 
 ### 2026-06-14 🧭 Canva E2E parity sweep — next-build priority + 4 new scope-gate greenlights
 - **Context:** After the Canva end-to-end audit + in-scope fix batch (see STANDUP 2026-06-14), CEO chose

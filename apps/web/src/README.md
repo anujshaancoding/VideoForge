@@ -20,6 +20,27 @@ Chrome/Edge desktop only (see `lib/browser.ts` / `routes/BrowserGate.tsx`).
 - `components/editor/index.ts` — barrel for the seven editor shell components.
 - `routes/` — BrowserGate, Dashboard, NewProjectModal, Editor.
 
+## AI Edit Command Bar
+
+Prompt-based editing lives in `ai-edit/` and is deliberately structured:
+
+- `parser.ts` converts natural language into an `EditPlan`. The local rule parser
+  works without API keys; `parseWithLLM()` is an adapter seam for OpenAI/Anthropic/Groq
+  and only exchanges compact timeline metadata, never video files.
+- `validation.ts` checks time ranges, target ids, safe effect ranges, aspect ratios,
+  audio targets, and destructive-edit confirmation before anything applies.
+- `store/editorStore.ts` exposes `applyAIEditPlan(plan)`, which applies the validated
+  plan through one undoable Zustand/Immer commit. AI output never mutates arbitrary UI
+  state directly.
+- `components/editor/ai-edit/` contains the command bar, preview/confirmation panel,
+  action list, and error message UI.
+
+Supported local commands include trim/delete ranges, fade/crossfade transitions,
+brightness/contrast/saturation, 9:16/16:9/1:1/4:5 aspect changes, zoom, audio volume,
+mute ranges, fade in/out, and manual caption text. Automatic silence removal is parsed
+and validated, but currently returns a visible unsupported warning because waveform
+silence detection is not implemented yet.
+
 ## Intentional stubs (compile + run, honestly placeholdered)
 
 Per the contract, heavy capabilities are clearly-commented placeholders, marked with
